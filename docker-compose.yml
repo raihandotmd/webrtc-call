@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  coturn:
+    image: coturn/coturn:latest
+    container_name: coturn-server
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "5349:5349"
+      - "49160-49200:49160-49200/udp"  # Smaller range to avoid conflicts
+    restart: unless-stopped
+    command: [
+      "-v", 
+      "--listening-port=3478",
+      "--tls-listening-port=5349", 
+      "--min-port=49160",
+      "--max-port=49200",
+      "--user=testuser:testpass",
+      "--realm=localhost",
+      "--log-file=stdout",
+      "--lt-cred-mech",
+      "--no-multicast-peers",
+      "--no-cli"
+    ]
+  # Your existing Go app (optional - uncomment if you want to run via Docker)
+  # webrtc-server:
+  #   build: .
+  #   ports:
+  #     - "8080:8080"
+  #   depends_on:
+  #     - coturn

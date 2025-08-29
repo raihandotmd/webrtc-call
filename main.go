@@ -155,26 +155,28 @@ func main() {
 	app.Get("/ice-servers", func(c *fiber.Ctx) error {
 		iceServers := fiber.Map{
 			"iceServers": []fiber.Map{
-				// STUN server for NAT discovery
+				// STUN servers for NAT discovery (multiple for redundancy)
 				{"urls": "stun:stun.l.google.com:19302"},
+				{"urls": "stun:stun1.l.google.com:19302"},
+
+				// TURN server (now running via Docker)
 				{
 					"urls":       "turn:localhost:3478",
 					"username":   "testuser",
 					"credential": "testpass",
 				},
 
-				// TURN server for relay (when P2P fails)
-				// Example TURN server configuration:
+				// Uncomment and configure these when you have actual TURN servers:
 				// {
-				// 	"urls":       []string{"turn:your-turn-server.com:3478"},
-				// 	"username":   "your-turn-username",
-				// 	"credential": "your-turn-password",
+				// 	"urls":       "turn:your-turn-server.com:3478",
+				// 	"username":   "your-username",
+				// 	"credential": "your-password",
 				// },
-				// You can add multiple TURN servers for redundancy:
+				// For TURNS (secure TURN):
 				// {
-				//     "urls":       []string{"turn:backup-turn.com:3478", "turns:backup-turn.com:5349"},
-				//     "username":   "backup-username",
-				//     "credential": "backup-password",
+				// 	"urls":       "turns:your-turn-server.com:5349",
+				// 	"username":   "your-username",
+				// 	"credential": "your-password",
 				// },
 			},
 		}
@@ -192,6 +194,10 @@ func main() {
 
 	app.Get("/callerB.html", func(c *fiber.Ctx) error {
 		return c.SendFile("./callerB.html")
+	})
+
+	app.Get("/diagnostics.html", func(c *fiber.Ctx) error {
+		return c.SendFile("./diagnostics.html")
 	})
 
 	log.Println("🚀 GoFiber WebRTC Signaling Server started at :8080")

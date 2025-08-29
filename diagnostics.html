@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebRTC ICE Diagnostics</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .status { margin: 10px 0; padding: 10px; border-radius: 5px; }
+    .success { background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+    .warning { background-color: #fff3cd; border: 1px solid #ffeaa7; color: #856404; }
+    .error { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+    .info { background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }
+    pre { background: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto; }
+    button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
+    .primary { background: #007bff; color: white; }
+    .danger { background: #dc3545; color: white; }
+  </style>
+</head>
+<body>
+  <h1>🔧 WebRTC ICE Diagnostics</h1>
+  
+  <div>
+    <button id="testBtn" class="primary">🧪 Run ICE Test</button>
+    <button id="clearBtn" class="danger">🗑️ Clear Results</button>
+  </div>
+  
+  <div id="results"></div>
+  
+  <script>
+    const resultsDiv = document.getElementById('results');
+    const testBtn = document.getElementById('testBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    
+    function addResult(type, title, content) {
+      const div = document.createElement('div');
+      div.className = `status ${type}`;
+      div.innerHTML = `<strong>${title}</strong><br>${content}`;
+      resultsDiv.appendChild(div);
+    }
+    
+    function addCode(content) {
+      const pre = document.createElement('pre');
+      pre.textContent = content;
+      resultsDiv.appendChild(pre);
+    }
+    
+    async function runDiagnostics() {
+      resultsDiv.innerHTML = '';
+      addResult('info', '🚀 Starting ICE Diagnostics', 'Testing WebRTC connectivity...');
+      
+      try {
+        // 1. Test ICE servers configuration
+        const response = await fetch('/ice-servers');
+        const config = await response.json();
+        addResult('success', '✅ ICE Servers Config Retrieved', `Found ${config.iceServers.length} ICE servers`);
+        addCode(JSON.stringify(config, null, 2));
+        
+        // 2. Create test peer connection
+        const pc = new RTCPeerConnection({
+          iceServers: config.iceServers,
+          iceCandidatePoolSize: 10
+        });
+        
+        addResult('success', '✅ RTCPeerConnection Created', 'Peer connection initialized');
+        
+        // 3. Monitor ICE gathering
+        const candidates = [];
+        let gatheringComplete = false;
+        
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            candidates.push({
+              type: event.candidate.type,
+              protocol: event.candidate.protocol,
+              candidate: event.candidate.candidate,
+              component: event.candidate.component,
+              priority: event.candidate.priority
+            });
+            addResult('info', '🔍 ICE Candidate Found', 
+              `Type: ${event.candidate.type}, Protocol: ${event.candidate.protocol}`);
+          } else {
+            gatheringComplete = true;
+            addResult('success', '✅ ICE Gathering Complete', 
+              `Found ${candidates.length} total candidates`);
+            
+            // Analyze candidates
+            const hostCandidates = candidates.filter(c => c.type === 'host');
+            const srflxCandidates = candidates.filter(c => c.type === 'srflx');
+            const relayCandidates = candidates.filter(c => c.type === 'relay');
+            
+            addResult('info', '📊 Candidate Summary', 
+              `Host: ${hostCandidates.length}, Server Reflexive: ${srflxCandidates.length}, Relay: ${relayCandidates.length}`);
+            
+            if (srflxCandidates.length === 0) {
+              addResult('warning', '⚠️ STUN Issue Detected', 
+                'No server reflexive candidates found. STUN server may be blocked or unreachable.');
+            }
+            
+            if (relayCandidates.length === 0) {
+              addResult('warning', '⚠️ No TURN Relay', 
+                'No relay candidates found. This is expected since TURN server is not configured.');
+            }
+            
+            addCode('Detailed candidates:\n' + JSON.stringify(candidates, null, 2));
+          }
+        };
+        
+        pc.onicegatheringstatechange = () => {
+          addResult('info', '🔄 ICE Gathering State', 
+            `State changed to: ${pc.iceGatheringState}`);
+        };
+        
+        pc.oniceconnectionstatechange = () => {
+          addResult('info', '🔗 ICE Connection State', 
+            `State changed to: ${pc.iceConnectionState}`);
+          
+          if (pc.iceConnectionState === 'failed') {
+            addResult('error', '❌ ICE Connection Failed', 
+              'This indicates NAT traversal issues. Consider setting up a TURN server.');
+          }
+        };
+        
+        // 4. Create offer to trigger ICE gathering
+        addResult('info', '🎯 Creating Offer', 'Triggering ICE candidate gathering...');
+        const offer = await pc.createOffer({ offerToReceiveAudio: true });
+        await pc.setLocalDescription(offer);
+        
+        // Wait for gathering to complete or timeout
+        setTimeout(() => {
+          if (!gatheringComplete) {
+            addResult('warning', '⏰ ICE Gathering Timeout', 
+              'ICE gathering is taking longer than expected (10s). This may indicate network issues.');
+          }
+          pc.close();
+        }, 10000);
+        
+      } catch (error) {
+        addResult('error', '❌ Test Failed', `Error: ${error.message}`);
+        console.error('Diagnostic error:', error);
+      }
+    }
+    
+    function clearResults() {
+      resultsDiv.innerHTML = '';
+    }
+    
+    testBtn.addEventListener('click', runDiagnostics);
+    clearBtn.addEventListener('click', clearResults);
+    
+    addResult('info', '📋 Instructions', 
+      'Click "Run ICE Test" to diagnose WebRTC connectivity issues. This will test ICE server connectivity and candidate gathering without making an actual call.');
+  </script>
+</body>
+</html>

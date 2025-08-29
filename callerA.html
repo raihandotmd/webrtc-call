@@ -34,6 +34,7 @@
     let pc = null;
     let localStream = null;
     let isMuted = false;
+    let pendingIceCandidates = []; // Queue for ICE candidates received before remote description
     
     const connectBtn = document.getElementById("connectBtn");
     const callBtn = document.getElementById("callBtn");
@@ -141,7 +142,28 @@
     async function createPeerConnection() {
       const iceServers = await getIceServers();
       
-      pc = new RTCPeerConnection({ iceServers });
+      pc = new RTCPeerConnection({ 
+        iceServers,
+        // Add configuration for better ICE handling
+        iceCandidatePoolSize: 10,
+        iceTransportPolicy: 'all' // Use both UDP and TCP
+      });
+
+      // Set up ICE connection timeout
+      let iceTimeoutId = setTimeout(() => {
+        if (pc && pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') {
+          console.error("ICE connection timeout - failing after 30 seconds");
+          updateCallState("Connection Timeout - Check Network");
+          // Don't automatically hang up, let user decide
+        }
+      }, 30000); // 30 second timeout
+
+      // Clear timeout when ICE connects
+      pc.addEventListener('iceconnectionstatechange', () => {
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          clearTimeout(iceTimeoutId);
+        }
+      });
 
       // Handle ICE candidates
       pc.onicecandidate = (event) => {
@@ -169,6 +191,53 @@
           updateCallState("P2P Connected");
         } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
           updateCallState("P2P Disconnected");
+        }
+      };
+
+      // Handle ICE connection state changes (more detailed than connection state)
+      pc.oniceconnectionstatechange = () => {
+        console.log("ICE Connection state:", pc.iceConnectionState);
+        switch (pc.iceConnectionState) {
+          case "checking":
+            updateCallState("Checking connectivity...");
+            break;
+          case "connected":
+            updateCallState("ICE Connected");
+            break;
+          case "completed":
+            updateCallState("ICE Completed - Call Active");
+            break;
+          case "failed":
+            console.error("ICE connection failed - this is likely due to NAT/firewall issues");
+            updateCallState("Connection Failed - NAT/Firewall Issue");
+            // Attempt restart
+            console.log("Attempting ICE restart...");
+            pc.restartIce();
+            break;
+          case "disconnected":
+            console.warn("ICE disconnected - network may have changed");
+            updateCallState("ICE Disconnected - Network Changed");
+            break;
+          case "closed":
+            updateCallState("ICE Closed");
+            break;
+        }
+      };
+
+      // Handle ICE gathering state
+      pc.onicegatheringstatechange = () => {
+        console.log("ICE Gathering state:", pc.iceGatheringState);
+      };
+
+      // Handle ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+          console.log("Sending ICE candidate to", remoteClientId);
+          ws.send(JSON.stringify({
+            type: "candidate",
+            to: remoteClientId,
+            data: event.candidate.toJSON()
+          }));
         }
       };
 
@@ -345,9 +414,10 @@
     // Reset call UI to initial state
     function resetCallUI() {
       incomingCallDiv.style.display = "none";
-      callBtn.disabled = false;
+      callBtn.disabled = true;  // Disable call button until reconnected
       hangupBtn.disabled = true;
       muteBtn.disabled = true;
+      connectBtn.disabled = false;  // Enable connect button for reconnection
       
       // Reset mute state
       isMuted = false;
@@ -409,6 +479,10 @@
       if (!pc) await createPeerConnection();
 
       await pc.setRemoteDescription(offer);
+      
+      // Process any queued ICE candidates now that remote description is set
+      await processPendingCandidates();
+      
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
@@ -429,17 +503,49 @@
     async function handleAnswer(answer) {
       console.log("Received answer from", remoteClientId);
       await pc.setRemoteDescription(answer);
+      
+      // Process any queued ICE candidates now that remote description is set
+      await processPendingCandidates();
+      
       updateCallState("Call connected");
       hangupBtn.disabled = false; // Ensure hangup stays enabled for caller
       muteBtn.disabled = false; // Enable mute button when call is connected
     }
 
-    // Handle incoming ICE candidate
+    // Handle incoming ICE candidate with queuing for timing issues
     async function handleCandidate(candidate) {
-      console.log("Received ICE candidate from", remoteClientId);
+      console.log("Received ICE candidate from", remoteClientId, "type:", candidate.type);
+      
       if (pc && pc.remoteDescription) {
-        await pc.addIceCandidate(candidate);
+        // Remote description is set, add candidate immediately
+        try {
+          await pc.addIceCandidate(candidate);
+          console.log("Successfully added ICE candidate");
+        } catch (error) {
+          console.error("Failed to add ICE candidate:", error);
+        }
+      } else {
+        // Remote description not set yet, queue the candidate
+        console.log("Queuing ICE candidate until remote description is set");
+        pendingIceCandidates.push(candidate);
       }
+    }
+
+    // Process queued ICE candidates after remote description is set
+    async function processPendingCandidates() {
+      console.log(`Processing ${pendingIceCandidates.length} pending ICE candidates`);
+      
+      for (const candidate of pendingIceCandidates) {
+        try {
+          await pc.addIceCandidate(candidate);
+          console.log("Successfully added queued ICE candidate:", candidate.type);
+        } catch (error) {
+          console.error("Failed to add queued ICE candidate:", error);
+        }
+      }
+      
+      // Clear the queue
+      pendingIceCandidates = [];
     }
 
     // Initiate call (Client A becomes caller)
@@ -481,6 +587,9 @@
         pc = null;
       }
 
+      // Clear any pending ICE candidates
+      pendingIceCandidates = [];
+
       // Stop local stream
       if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
@@ -491,8 +600,18 @@
       remoteAudio.srcObject = null;
       
       // Reset UI
-      updateCallState("Call ended");
+      updateCallState("Call ended - Disconnecting...");
       resetCallUI();
+      
+      // Close WebSocket connection to force clean reconnection
+      if (ws) {
+        console.log("Closing WebSocket connection for clean state");
+        ws.close();
+        ws = null;
+      }
+      
+      // Update UI to show disconnected state
+      updateStatus("Disconnected - Click Connect to make new calls");
     }
 
     // Event listeners
