@@ -10,6 +10,7 @@
     <button id="connectBtn">Connect to Server</button>
     <button id="callBtn" disabled>Call Client A</button>
     <button id="hangupBtn" disabled>Hang Up</button>
+    <button id="muteBtn" disabled style="background: #ff9800; color: white; padding: 8px 16px; margin: 5px;">🎤 Mute</button>
   </div>
   
   <!-- Incoming call notification -->
@@ -32,10 +33,12 @@
     let ws = null;
     let pc = null;
     let localStream = null;
+    let isMuted = false;
     
     const connectBtn = document.getElementById("connectBtn");
     const callBtn = document.getElementById("callBtn");
     const hangupBtn = document.getElementById("hangupBtn");
+    const muteBtn = document.getElementById("muteBtn");
     const acceptBtn = document.getElementById("acceptBtn");
     const rejectBtn = document.getElementById("rejectBtn");
     const incomingCallDiv = document.getElementById("incomingCallDiv");
@@ -55,10 +58,77 @@
       console.log("Call State:", state);
     }
 
+    // Get current host for dynamic URL construction
+    const currentHost = window.location.host; // Gets hostname:port from current URL
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const httpProtocol = window.location.protocol;
+
+    // Check and request microphone permissions early
+    async function checkMicrophonePermission() {
+      try {
+        // Check if permissions API is available
+        if ('permissions' in navigator) {
+          const permission = await navigator.permissions.query({ name: 'microphone' });
+          console.log("Microphone permission state:", permission.state);
+          
+          if (permission.state === 'denied') {
+            updateStatus("Microphone access denied. Please enable in browser settings.");
+            alert("Microphone access is required for calls. Please enable it in your browser settings and refresh the page.");
+            return false;
+          }
+        }
+        
+        // For mobile browsers, request permission early
+        const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        testStream.getTracks().forEach(track => track.stop()); // Clean up test stream
+        console.log("Microphone permission granted");
+        return true;
+      } catch (error) {
+        console.error("Microphone permission check failed:", error);
+        if (error.name === 'NotAllowedError') {
+          updateStatus("Microphone permission denied. Please allow access.");
+          alert("Microphone access is required for calls. Please allow when prompted and refresh if needed.");
+        }
+        return false;
+      }
+    }
+
+    // Mute/Unmute microphone
+    function toggleMute() {
+      if (!localStream) {
+        console.log("No local stream to mute");
+        return;
+      }
+
+      const audioTracks = localStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        console.log("No audio tracks to mute");
+        return;
+      }
+
+      isMuted = !isMuted;
+      
+      // Toggle all audio tracks
+      audioTracks.forEach(track => {
+        track.enabled = !isMuted;
+      });
+
+      // Update button appearance
+      if (isMuted) {
+        muteBtn.innerHTML = "🔇 Unmute";
+        muteBtn.style.background = "#f44336"; // Red when muted
+        console.log("Microphone muted");
+      } else {
+        muteBtn.innerHTML = "🎤 Mute";
+        muteBtn.style.background = "#ff9800"; // Orange when unmuted
+        console.log("Microphone unmuted");
+      }
+    }
+
     // Get ICE servers configuration from server
     async function getIceServers() {
       try {
-        const response = await fetch("http://localhost:8080/ice-servers");
+        const response = await fetch(`${httpProtocol}//${currentHost}/ice-servers`);
         const config = await response.json();
         return config.iceServers;
       } catch (error) {
@@ -111,10 +181,18 @@
     }
 
     // Connect to WebSocket signaling server
-    function connectToServer() {
+    async function connectToServer() {
+      updateStatus("Checking microphone permission...");
+      
+      // Check microphone permission first
+      const hasPermission = await checkMicrophonePermission();
+      if (!hasPermission) {
+        return; // Don't connect if no microphone permission
+      }
+      
       updateStatus("Connecting to server...");
       
-      ws = new WebSocket(`ws://localhost:8080/ws?id=${clientId}`);
+      ws = new WebSocket(`${wsProtocol}//${currentHost}/ws?id=${clientId}`);
 
       ws.onopen = () => {
         updateStatus("Connected to server");
@@ -185,6 +263,7 @@
       // Enable hangup button as soon as call is accepted
       callBtn.disabled = true;
       hangupBtn.disabled = false;
+      muteBtn.disabled = false;
       
       // Now proceed with WebRTC offer/answer exchange
       await initiateWebRTCCall();
@@ -224,6 +303,7 @@
       updateCallState("Call accepted, waiting for connection...");
       callBtn.disabled = true;
       hangupBtn.disabled = false;
+      muteBtn.disabled = false;
       
       // Get user media ready for when offer comes
       try {
@@ -231,7 +311,17 @@
         console.log("Got local stream for accepting call");
       } catch (error) {
         console.error("Error getting media for accepting call:", error);
-        updateCallState("Failed to get microphone");
+        if (error.name === 'NotAllowedError') {
+          updateCallState("Microphone permission denied. Please allow microphone access.");
+          alert("Please allow microphone access to make calls. Check your browser settings.");
+        } else if (error.name === 'NotFoundError') {
+          updateCallState("No microphone found");
+        } else {
+          updateCallState("Failed to get microphone: " + error.name);
+        }
+        // Reset UI since we can't continue without audio
+        resetCallUI();
+        return;
       }
     }
 
@@ -257,6 +347,12 @@
       incomingCallDiv.style.display = "none";
       callBtn.disabled = false;
       hangupBtn.disabled = true;
+      muteBtn.disabled = true;
+      
+      // Reset mute state
+      isMuted = false;
+      muteBtn.innerHTML = "🎤 Mute";
+      muteBtn.style.background = "#ff9800";
     }
 
     // Initiate WebRTC call (after call acceptance)
@@ -264,8 +360,22 @@
       try {
         // Get user media if not already obtained
         if (!localStream) {
-          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          console.log("Got local stream for WebRTC call");
+          try {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            console.log("Got local stream for WebRTC call");
+          } catch (mediaError) {
+            console.error("Error getting media for WebRTC call:", mediaError);
+            if (mediaError.name === 'NotAllowedError') {
+              updateCallState("Microphone permission denied. Please allow microphone access.");
+              alert("Please allow microphone access to make calls. Check your browser settings.");
+            } else if (mediaError.name === 'NotFoundError') {
+              updateCallState("No microphone found");
+            } else {
+              updateCallState("Failed to get microphone: " + mediaError.name);
+            }
+            resetCallUI();
+            return;
+          }
         }
 
         // Create peer connection
@@ -284,6 +394,7 @@
 
         updateCallState("Sending offer...");
         hangupBtn.disabled = false; // Enable hangup for caller
+        muteBtn.disabled = false; // Enable mute for caller
 
       } catch (error) {
         console.error("Error initiating WebRTC call:", error);
@@ -312,6 +423,7 @@
       updateCallState("Answer sent, connecting...");
       callBtn.disabled = true;
       hangupBtn.disabled = false;
+      muteBtn.disabled = false;
     }
 
     // Handle incoming answer
@@ -320,6 +432,7 @@
       await pc.setRemoteDescription(answer);
       updateCallState("Call connected");
       hangupBtn.disabled = false; // Ensure hangup stays enabled for caller
+      muteBtn.disabled = false; // Enable mute button when call is connected
     }
 
     // Handle incoming ICE candidate
@@ -387,6 +500,7 @@
     connectBtn.addEventListener("click", connectToServer);
     callBtn.addEventListener("click", makeCall);
     hangupBtn.addEventListener("click", () => hangup(true));
+    muteBtn.addEventListener("click", toggleMute);
     acceptBtn.addEventListener("click", acceptCall);
     rejectBtn.addEventListener("click", rejectCall);
 

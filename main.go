@@ -176,8 +176,10 @@ func main() {
 	})
 
 	log.Println("🚀 GoFiber WebRTC Signaling Server started at :8080")
-	log.Println("📡 WebSocket endpoint: ws://localhost:8080/ws?id=<client_id>")
-	log.Println("🌐 Web interface: http://localhost:8080")
+	log.Println("📡 WebSocket endpoint: ws://0.0.0.0:8080/ws?id=<client_id>")
+	log.Println("🌐 Web interface: http://0.0.0.0:8080")
+	log.Println("📱 For mobile testing: Use VS Code port forwarding or your local IP")
+	log.Println("🔧 Server listening on all interfaces (0.0.0.0:8080)")
 
 	log.Fatal(app.Listen(":8080"))
 }
