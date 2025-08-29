@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
 
-	"github.com/gorilla/websocket"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/websocket/v2"
 )
 
 // Client represents a connected WebSocket client
@@ -21,7 +21,6 @@ type Hub struct {
 	Clients    map[string]*Client
 	Register   chan *Client
 	Unregister chan *Client
-	Broadcast  chan []byte
 }
 
 // SignalingMessage represents WebRTC signaling data
@@ -32,19 +31,12 @@ type SignalingMessage struct {
 	Data interface{} `json:"data"`
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for development
-	},
-}
-
 // NewHub creates a new Hub instance
 func NewHub() *Hub {
 	return &Hub{
 		Clients:    make(map[string]*Client),
 		Register:   make(chan *Client),
 		Unregister: make(chan *Client),
-		Broadcast:  make(chan []byte),
 	}
 }
 
@@ -71,50 +63,69 @@ func (h *Hub) SendToClient(clientID string, message []byte) error {
 	if client, exists := h.Clients[clientID]; exists {
 		return client.Conn.WriteMessage(websocket.TextMessage, message)
 	}
-	return fmt.Errorf("client %s not found", clientID)
+	log.Printf("Client %s not found", clientID)
+	return nil
 }
 
-// CORS middleware
-func enableCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-}
+func main() {
+	// Create Fiber app
+	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			return c.Status(500).SendString(err.Error())
+		},
+	})
 
-// WebSocket handler for signaling
-func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	enableCORS(w)
+	// CORS middleware
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
+		AllowHeaders: "Origin, Content-Type, Accept",
+	}))
 
-	clientID := r.URL.Query().Get("id")
-	if clientID == "" {
-		http.Error(w, "Client ID required", http.StatusBadRequest)
-		return
-	}
+	// Create and start hub
+	hub := NewHub()
+	go hub.Run()
 
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
-		return
-	}
+	// WebSocket upgrade middleware
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		// Check if it's a WebSocket upgrade request
+		if websocket.IsWebSocketUpgrade(c) {
+			c.Locals("allowed", true)
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
 
-	client := &Client{
-		ID:   clientID,
-		Conn: conn,
-		Hub:  hub,
-	}
+	// WebSocket handler
+	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
+		// Get client ID from query parameter
+		clientID := c.Query("id")
+		if clientID == "" {
+			log.Println("Client ID required")
+			c.Close()
+			return
+		}
 
-	hub.Register <- client
+		// Create client
+		client := &Client{
+			ID:   clientID,
+			Conn: c,
+			Hub:  hub,
+		}
 
-	// Handle incoming messages
-	go func() {
+		// Register client
+		hub.Register <- client
+
+		// Handle client disconnect
 		defer func() {
 			hub.Unregister <- client
-			conn.Close()
+			c.Close()
 		}()
 
+		// Handle incoming messages
 		for {
 			var msg SignalingMessage
-			err := conn.ReadJSON(&msg)
+			err := c.ReadJSON(&msg)
 			if err != nil {
 				log.Printf("ReadJSON error for client %s: %v", clientID, err)
 				break
@@ -138,48 +149,35 @@ func handleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-	}()
-}
+	}))
 
-// Get ICE servers configuration
-func handleICEServers(w http.ResponseWriter, r *http.Request) {
-	enableCORS(w)
-
-	if r.Method == http.MethodOptions {
-		return
-	}
-
-	iceServers := map[string]interface{}{
-		"iceServers": []map[string]interface{}{
-			{"urls": "stun:stun.l.google.com:19302"},
-			// Add TURN servers here if needed for production
-		},
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(iceServers)
-}
-
-func main() {
-	hub := NewHub()
-	go hub.Run()
-
-	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		handleWebSocket(hub, w, r)
+	// ICE servers endpoint
+	app.Get("/ice-servers", func(c *fiber.Ctx) error {
+		iceServers := fiber.Map{
+			"iceServers": []fiber.Map{
+				{"urls": "stun:stun.l.google.com:19302"},
+				// Add TURN servers here if needed for production
+			},
+		}
+		return c.JSON(iceServers)
 	})
-
-	http.HandleFunc("/ice-servers", handleICEServers)
 
 	// Serve static files
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			http.ServeFile(w, r, "callerA.html")
-			return
-		}
-		http.ServeFile(w, r, r.URL.Path[1:])
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendFile("./callerA.html")
 	})
 
-	fmt.Println("P2P WebRTC Signaling Server started at :8080")
-	fmt.Println("WebSocket endpoint: ws://localhost:8080/ws?id=<client_id>")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	app.Get("/callerA.html", func(c *fiber.Ctx) error {
+		return c.SendFile("./callerA.html")
+	})
+
+	app.Get("/callerB.html", func(c *fiber.Ctx) error {
+		return c.SendFile("./callerB.html")
+	})
+
+	log.Println("🚀 GoFiber WebRTC Signaling Server started at :8080")
+	log.Println("📡 WebSocket endpoint: ws://localhost:8080/ws?id=<client_id>")
+	log.Println("🌐 Web interface: http://localhost:8080")
+
+	log.Fatal(app.Listen(":8080"))
 }

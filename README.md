@@ -1,18 +1,25 @@
 # WebRTC Peer-to-Peer Audio Call
 
-This project implements a **peer-to-peer WebRTC audio calling system** with a WebSocket-based signaling server.
+This project implements a **peer-to-peer WebRTC audio calling system** with a **GoFiber WebSocket-based signaling server**.
 
 ## Architecture Overview
 
 ```
 Client A ←─── Direct P2P Audio ────→ Client B
     ↓                                   ↓  
-    └─── WebSocket Signaling ─────────→ Go Server
+    └─── GoFiber WebSocket Signaling ──→ Go Server
 ```
 
-- **Signaling**: WebSocket messages for SDP offers/answers and ICE candidates
+- **Signaling**: GoFiber WebSocket messages for SDP offers/answers and ICE candidates
 - **Media**: Direct peer-to-peer RTP audio streams (no server relay)
 - **NAT Traversal**: STUN servers for discovering public IP addresses
+
+## Technology Stack
+
+- **Backend**: Go with GoFiber framework
+- **WebSocket**: GoFiber WebSocket for real-time signaling
+- **Frontend**: Vanilla JavaScript with WebRTC API
+- **NAT Traversal**: STUN servers (Google's public STUN server)
 
 ## Key Changes from Previous Version
 
@@ -29,13 +36,19 @@ Client A ←─── Direct P2P Audio ────→ Client B
 
 ## How to Run
 
-### 1. Start the Server
+### 1. Install Dependencies
+```bash
+go mod tidy  # Downloads GoFiber and WebSocket dependencies
+```
+
+### 2. Start the Server
 ```bash
 go run main.go
 ```
 Server starts on: `http://localhost:8080`
+You'll see the GoFiber startup banner with server info.
 
-### 2. Open Clients
+### 3. Open Clients
 - **Client A**: Open `http://localhost:8080/callerA.html`
 - **Client B**: Open `http://localhost:8080/callerB.html` 
 
@@ -100,25 +113,38 @@ ws.send({type: "hangup", to: remoteId});
 
 ## Server Implementation
 
-### WebSocket Signaling Hub
+### GoFiber WebSocket Hub
 ```go
+// Client management with GoFiber
 type Hub struct {
-    Clients    map[string]*Client  // Connected clients
+    Clients    map[string]*Client  // Connected WebSocket clients
     Register   chan *Client        // New client connections
     Unregister chan *Client        // Client disconnections
 }
+
+// GoFiber WebSocket handler
+app.Get("/ws", websocket.New(func(c *websocket.Conn) {
+    // Handle WebSocket connections and message routing
+}))
 ```
 
-### Message Routing
+### Message Routing with GoFiber
 ```go
-// Server simply routes messages between clients
+// Server routes messages between clients using GoFiber
 type SignalingMessage struct {
-    Type string      // "offer", "answer", "candidate"
+    Type string      // "offer", "answer", "candidate", "call-request", etc.
     To   string      // Target client ID  
     From string      // Sender client ID
     Data interface{} // WebRTC data (SDP/ICE)
 }
 ```
+
+### GoFiber Features Used
+- **Built-in CORS**: `cors.New()` middleware for cross-origin requests
+- **WebSocket Support**: Native WebSocket handling with `websocket.New()`
+- **Static File Serving**: Built-in static file serving for HTML clients
+- **JSON Handling**: Automatic JSON parsing and response generation
+- **Error Handling**: Centralized error handling with custom error handlers
 
 ## Client Features
 
@@ -138,7 +164,52 @@ type SignalingMessage struct {
 - **Call state**: No Call → Requesting → Calling → Connected → Call Ended
 - **Proper cleanup**: Both clients notified when call ends
 
-## Benefits of P2P Approach
+## Benefits of GoFiber Implementation
+
+### **Performance & Developer Experience**
+- 🚀 **Fast**: Express-inspired, built on Fasthttp (faster than standard net/http)
+- 🎯 **Simple API**: Clean, intuitive routing and middleware system
+- 📦 **Built-in Features**: CORS, static files, JSON handling out of the box
+- 🔧 **Easy WebSocket**: Native WebSocket support with simple API
+
+### **Code Comparison**
+
+#### **Before (Gorilla WebSocket + net/http):**
+```go
+// Manual CORS headers
+func enableCORS(w http.ResponseWriter) {
+    w.Header().Set("Access-Control-Allow-Origin", "*")
+    // ... more header setup
+}
+
+// Manual WebSocket upgrade
+upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+conn, err := upgrader.Upgrade(w, r, nil)
+
+// Manual route handling
+http.HandleFunc("/ws", handleWebSocket)
+http.HandleFunc("/ice-servers", handleICEServers)
+```
+
+#### **After (GoFiber):**
+```go
+// Built-in CORS middleware
+app.Use(cors.New(cors.Config{AllowOrigins: "*"}))
+
+// Simple WebSocket handling
+app.Get("/ws", websocket.New(func(c *websocket.Conn) { /* handler */ }))
+
+// Clean route definition
+app.Get("/ice-servers", func(c *fiber.Ctx) error { return c.JSON(data) })
+```
+
+### **Production Benefits**
+- ⚡ **Better Performance**: Fasthttp backend vs standard net/http
+- 🛠️ **Middleware Ecosystem**: Rich middleware for logging, recovery, rate limiting
+- 📊 **Built-in Metrics**: Easy to add monitoring and health checks
+- 🔄 **Graceful Shutdown**: Built-in support for graceful server shutdown
+
+## Benefits of P2P Architecture
 
 ### **Performance**
 - **Lower Latency**: Direct connection, no server relay
