@@ -155,8 +155,22 @@ func main() {
 	app.Get("/ice-servers", func(c *fiber.Ctx) error {
 		iceServers := fiber.Map{
 			"iceServers": []fiber.Map{
+				// STUN server for NAT discovery
 				{"urls": "stun:stun.l.google.com:19302"},
-				// Add TURN servers here if needed for production
+
+				// TURN server for relay (when P2P fails)
+				// Example TURN server configuration:
+				// {
+				// 	"urls":       []string{"turn:your-turn-server.com:3478"},
+				// 	"username":   "your-turn-username",
+				// 	"credential": "your-turn-password",
+				// },
+				// You can add multiple TURN servers for redundancy:
+				// {
+				//     "urls":       []string{"turn:backup-turn.com:3478", "turns:backup-turn.com:5349"},
+				//     "username":   "backup-username",
+				//     "credential": "backup-password",
+				// },
 			},
 		}
 		return c.JSON(iceServers)
