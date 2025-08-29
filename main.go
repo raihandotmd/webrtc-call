@@ -157,6 +157,11 @@ func main() {
 			"iceServers": []fiber.Map{
 				// STUN server for NAT discovery
 				{"urls": "stun:stun.l.google.com:19302"},
+				{
+					"urls":       "turn:localhost:3478",
+					"username":   "testuser",
+					"credential": "testpass",
+				},
 
 				// TURN server for relay (when P2P fails)
 				// Example TURN server configuration:
