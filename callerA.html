@@ -182,6 +182,10 @@
       console.log("Call was accepted by", remoteClientId);
       updateCallState("Call accepted, connecting...");
       
+      // Enable hangup button as soon as call is accepted
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+      
       // Now proceed with WebRTC offer/answer exchange
       await initiateWebRTCCall();
     }
@@ -279,6 +283,7 @@
         }));
 
         updateCallState("Sending offer...");
+        hangupBtn.disabled = false; // Enable hangup for caller
 
       } catch (error) {
         console.error("Error initiating WebRTC call:", error);
@@ -314,6 +319,7 @@
       console.log("Received answer from", remoteClientId);
       await pc.setRemoteDescription(answer);
       updateCallState("Call connected");
+      hangupBtn.disabled = false; // Ensure hangup stays enabled for caller
     }
 
     // Handle incoming ICE candidate
