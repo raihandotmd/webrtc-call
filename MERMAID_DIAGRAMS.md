@@ -37,14 +37,9 @@ graph TB
     B -.->|STUN Requests| STUN
     
     A ==>|Direct P2P RTP Audio| B
-    
-    style A fill:#e1f5fe
-    style B fill:#e8f5e8
-    style S fill:#fff3e0
-    style STUN fill:#f3e5f5
 ```
 
-## 2. Complete Call Flow Sequence
+## **2. Complete Call Flow Sequence**
 
 ```mermaid
 sequenceDiagram
@@ -52,18 +47,18 @@ sequenceDiagram
     participant S as GoFiber Server
     participant CB as Client B
     participant STUN as STUN Server
-    
+
     Note over CA, CB: Phase 1: Connection Setup
     CA->>S: WebSocket Connect (/ws?id=a)
     S->>S: Register Client A
     CB->>S: WebSocket Connect (/ws?id=b)
     S->>S: Register Client B
-    
+
     Note over CA, CB: Phase 2: Call Initiation
     CA->>S: call-request → Client B
     S->>CB: Forward call-request from A
     CB->>CB: Show incoming call UI
-    
+
     alt Call Accepted
         CB->>S: call-accept → Client A
         S->>CA: Forward call-accept from B
@@ -74,13 +69,13 @@ sequenceDiagram
         CA->>CA: Reset call UI
         Note over CA, CB: Call ends here if rejected
     end
-    
+
     Note over CA, CB: Phase 3: WebRTC Setup
     CA->>S: GET /ice-servers
     S-->>CA: [STUN server config]
     CB->>S: GET /ice-servers
     S-->>CB: [STUN server config]
-    
+
     par ICE Discovery
         CA->>STUN: Discover public IP
         STUN-->>CA: Public IP: 203.0.113.45
@@ -88,20 +83,20 @@ sequenceDiagram
         CB->>STUN: Discover public IP
         STUN-->>CB: Public IP: 198.51.100.33
     end
-    
+
     Note over CA, CB: Phase 4: SDP Exchange
     CA->>CA: Create RTCPeerConnection
     CA->>CA: Create SDP Offer
     CA->>S: offer → Client B
     S->>CB: Forward SDP offer from A
-    
+
     CB->>CB: Create RTCPeerConnection
     CB->>CB: Set remote description (offer)
     CB->>CB: Create SDP Answer
     CB->>S: answer → Client A
     S->>CA: Forward SDP answer from B
     CA->>CA: Set remote description (answer)
-    
+
     Note over CA, CB: Phase 5: ICE Candidate Exchange
     par ICE Candidates Exchange
         CA->>S: candidate → Client B
@@ -112,16 +107,20 @@ sequenceDiagram
         S->>CA: Forward ICE candidate from B
         CA->>CA: Add ICE candidate
     end
-    
+
     Note over CA, CB: Phase 6: Direct P2P Connection
-    CA<-->CB: ICE connectivity checks
-    CA<=>CB: DTLS handshake (encryption)
-    CA<=>CB: Direct RTP Audio Stream
-    
+    CA->>CB: ICE connectivity checks
+    CB->>CA: ICE connectivity checks
+    CA->>CB: DTLS handshake (encryption)
+    CB->>CA: DTLS handshake (encryption)
+    CA->>CB: Direct RTP Audio Stream
+    CB->>CA: Direct RTP Audio Stream
+
     Note over CA, CB: Phase 7: Active Call
-    CA<=>CB: Bidirectional audio
+    CA->>CB: Audio Stream
+    CB->>CA: Audio Stream
     Note over S: Server no longer involved in media
-    
+
     Note over CA, CB: Phase 8: Call Termination
     alt Hang up by Client A
         CA->>S: hangup → Client B
@@ -132,12 +131,12 @@ sequenceDiagram
         S->>CA: Forward hangup from B
         CA->>CA: Close connection & cleanup
     end
-    
+
     CA->>CA: Reset UI
     CB->>CB: Reset UI
 ```
 
-## 3. WebSocket Message Flow
+## **3. WebSocket Message Flow**
 
 ```mermaid
 graph TD
@@ -150,14 +149,14 @@ graph TD
         IC[candidate<br/>ICE candidate]
         H[hangup<br/>End call]
     end
-    
+
     subgraph "Client A Flow"
         A1[Click Call] --> A2[Send call-request]
         A3[Receive call-accept] --> A4[Send offer]
         A5[Receive answer] --> A6[Send candidates]
         A7[Click Hangup] --> A8[Send hangup]
     end
-    
+
     subgraph "Client B Flow"
         B1[Receive call-request] --> B2[Show Accept/Reject]
         B3[Click Accept] --> B4[Send call-accept]
@@ -165,145 +164,147 @@ graph TD
         B7[Send candidates] --> B8[P2P Connected]
         B9[Receive hangup] --> B10[Cleanup]
     end
-    
+
     subgraph "Server Hub"
         S1[Receive Message] --> S2[Set msg.From = clientID]
         S2 --> S3[Route to msg.To client]
         S3 --> S4[Forward via WebSocket]
     end
-    
+
     A2 --> S1
     A4 --> S1
     A8 --> S1
     S4 --> B1
     S4 --> B5
     S4 --> B9
-    
+
     B4 --> S1
     B6 --> S1
     S4 --> A3
     S4 --> A5
+
 ```
 
-## 4. WebRTC Peer Connection State Machine
+## **4. WebRTC Peer Connection State Machine**
 
 ```mermaid
 stateDiagram-v2
     [*] --> Disconnected
-    
+
     Disconnected --> Connecting : createPeerConnection()
     Connecting --> Connected : ICE Success
     Connecting --> Failed : ICE Failed
     Connecting --> Disconnected : Connection timeout
-    
+
     Connected --> HaveLocalOffer : createOffer()
     HaveLocalOffer --> HaveRemoteAnswer : setRemoteDescription(answer)
     HaveRemoteAnswer --> Stable : ICE complete
-    
+
     Connected --> HaveRemoteOffer : setRemoteDescription(offer)
     HaveRemoteOffer --> HaveLocalAnswer : createAnswer()
     HaveLocalAnswer --> Stable : ICE complete
-    
+
     Stable --> MediaFlow : ontrack event
     MediaFlow --> AudioPlaying : Audio streams active
-    
+
     AudioPlaying --> Closing : hangup()
     Closing --> Closed : cleanup complete
     Closed --> [*]
-    
+
     Failed --> [*]
     Disconnected --> [*]
+
 ```
 
-## 5. Server Architecture Components
+## **5. Server Architecture Components**
 
 ```mermaid
 graph TB
-    subgraph "GoFiber Application"
-        App[fiber.New()]
-        CORS[CORS Middleware]
-        Routes[HTTP Routes]
+    subgraph GoFiber_Application
+        App["fiber.New()"]
+        CORS["CORS Middleware"]
+        Routes["HTTP Routes"]
     end
-    
-    subgraph "WebSocket Layer"
-        WSMiddleware[WebSocket Upgrade Middleware]
-        WSHandler[WebSocket Connection Handler]
+
+    subgraph WebSocket_Layer
+        WSMiddleware["WebSocket Upgrade Middleware"]
+        WSHandler["WebSocket Connection Handler"]
     end
-    
-    subgraph "Client Management"
-        Hub[Hub Struct]
-        Clients[map[string]*Client]
-        Register[Register Channel]
-        Unregister[Unregister Channel]
+
+    subgraph Client_Management
+        Hub["Hub Struct"]
+        Clients["map[string]*Client"]
+        Register["Register Channel"]
+        Unregister["Unregister Channel"]
     end
-    
-    subgraph "Message Processing"
-        Reader[Message Reader Goroutine]
-        Router[Message Router]
-        Sender[Message Sender]
+
+    subgraph Message_Processing
+        Reader["Message Reader Goroutine"]
+        Router["Message Router"]
+        Sender["Message Sender"]
     end
-    
-    subgraph "HTTP Endpoints"
-        Static[Static File Server<br/>/callerA.html, /callerB.html]
-        ICEEndpoint[ICE Servers<br/>/ice-servers]
-        WSEndpoint[WebSocket<br/>/ws]
+
+    subgraph HTTP_Endpoints
+        Static["Static File Server\n/callerA.html, /callerB.html"]
+        ICEEndpoint["ICE Servers\n/ice-servers"]
+        WSEndpoint["WebSocket\n/ws"]
     end
-    
+
     App --> CORS
     CORS --> Routes
     Routes --> Static
     Routes --> ICEEndpoint
     Routes --> WSMiddleware
-    
+
     WSMiddleware --> WSHandler
     WSHandler --> Hub
     Hub --> Clients
     Hub --> Register
     Hub --> Unregister
-    
+
     WSHandler --> Reader
     Reader --> Router
     Router --> Sender
     Sender --> Clients
 ```
 
-## 6. Client-Side Component Flow
+## **6. Client-Side Component Flow**
 
 ```mermaid
 graph TD
-    subgraph "HTML Interface"
-        UI[User Interface]
-        ConnectBtn[Connect Button]
-        CallBtn[Call Button]
-        AcceptBtn[Accept Button]
-        RejectBtn[Reject Button]
-        HangupBtn[Hangup Button]
-        Status[Status Display]
-        Audio[Audio Element]
+    subgraph HTML_Interface
+        UI["User Interface"]
+        ConnectBtn["Connect Button"]
+        CallBtn["Call Button"]
+        AcceptBtn["Accept Button"]
+        RejectBtn["Reject Button"]
+        HangupBtn["Hangup Button"]
+        Status["Status Display"]
+        Audio["Audio Element"]
     end
-    
-    subgraph "JavaScript Core"
-        WS[WebSocket Connection]
-        PC[RTCPeerConnection]
-        Stream[MediaStream]
-        Handlers[Event Handlers]
+
+    subgraph JavaScript_Core
+        WS["WebSocket Connection"]
+        PC["RTCPeerConnection"]
+        Stream["MediaStream"]
+        Handlers["Event Handlers"]
     end
-    
-    subgraph "WebRTC APIs"
-        GetUserMedia[getUserMedia()]
-        CreateOffer[createOffer()]
-        CreateAnswer[createAnswer()]
-        AddTrack[addTrack()]
-        OnTrack[ontrack event]
-        OnICE[onicecandidate]
+
+    subgraph WebRTC_APIs
+        GetUserMedia["getUserMedia()"]
+        CreateOffer["createOffer()"]
+        CreateAnswer["createAnswer()"]
+        AddTrack["addTrack()"]
+        OnTrack["ontrack event"]
+        OnICE["onicecandidate"]
     end
-    
-    subgraph "Network Layer"
-        ICEServers[ICE Servers Config]
-        STUNQuery[STUN Queries]
-        P2PMedia[P2P Media Stream]
+
+    subgraph Network_Layer
+        ICEServers["ICE Servers Config"]
+        STUNQuery["STUN Queries"]
+        P2PMedia["P2P Media Stream"]
     end
-    
+
     UI --> Handlers
     ConnectBtn --> WS
     CallBtn --> Handlers
@@ -315,16 +316,17 @@ graph TD
     PC --> CreateAnswer
     PC --> OnICE
     OnTrack --> Audio
-    
+
     WS --> Handlers
     Handlers --> PC
     PC --> ICEServers
     ICEServers --> STUNQuery
     STUNQuery --> P2PMedia
     P2PMedia --> OnTrack
+
 ```
 
-## 7. Data Flow Architecture
+## **7. Data Flow Architecture**
 
 ```mermaid
 flowchart LR
@@ -335,13 +337,13 @@ flowchart LR
         A5[Microphone] --> A4
         A4 --> A6[Speakers]
     end
-    
+
     subgraph "Signaling Server"
         S1[GoFiber Router] --> S2[WebSocket Handler]
         S2 --> S3[Hub Manager]
         S3 --> S4[Message Router]
     end
-    
+
     subgraph "Client B"
         B1[HTML UI] --> B2[JavaScript]
         B2 --> B3[WebSocket]
@@ -349,29 +351,23 @@ flowchart LR
         B5[Microphone] --> B4
         B4 --> B6[Speakers]
     end
-    
+
     subgraph "Internet"
         I1[STUN Server]
         I2[Direct P2P Path]
     end
-    
+
     A3 -.->|Signaling| S2
     S4 -.->|Signaling| B3
-    
+
     A4 -->|STUN Query| I1
     B4 -->|STUN Query| I1
-    
+
     A4 ==>|RTP Audio| I2
     I2 ==>|RTP Audio| B4
-    
-    style A1 fill:#e1f5fe
-    style B1 fill:#e8f5e8
-    style S1 fill:#fff3e0
-    style I1 fill:#f3e5f5
-    style I2 fill:#ffebee
 ```
 
-## 8. Error Handling Flow
+## **8. Error Handling Flow**
 
 ```mermaid
 graph TD
@@ -380,38 +376,27 @@ graph TD
         CE3[WebSocket Disconnected] --> CE4[Disable Call Features]
         CE5[Server Unreachable] --> CE6[Retry Connection]
     end
-    
+
     subgraph "Call Errors"
         CAE1[Call Rejected] --> CAE2[Reset UI State]
         CAE3[Media Access Denied] --> CAE4[Show Microphone Error]
         CAE5[Remote Hangup] --> CAE6[Cleanup Connection]
     end
-    
+
     subgraph "WebRTC Errors"
         WE1[ICE Connection Failed] --> WE2[Show Connection Failed]
         WE3[Offer/Answer Failed] --> WE4[Reset Call State]
         WE5[STUN Server Unreachable] --> WE6[Try Fallback Methods]
     end
-    
+
     subgraph "Recovery Actions"
         RA1[Reset UI] --> RA2[Close Connections]
         RA2 --> RA3[Clear Media Streams]
         RA3 --> RA4[Enable Retry]
     end
-    
+
     CE2 --> RA1
     CAE2 --> RA1
     WE2 --> RA1
     CAE6 --> RA1
 ```
-
-## Usage Instructions
-
-1. Copy any of these Mermaid diagrams
-2. Paste into:
-   - GitHub README (renders automatically)
-   - Mermaid Live Editor: https://mermaid.live
-   - VS Code with Mermaid extension
-   - Documentation platforms (GitLab, Notion, etc.)
-
-These diagrams provide complete visualization of your WebRTC P2P calling system architecture and flow!
