@@ -6,93 +6,385 @@
 </head>
 <body>
   <h1>Caller B</h1>
+  <div>
+    <button id="connectBtn">Connect to Server</button>
+    <button id="callBtn" disabled>Call Client A</button>
+    <button id="hangupBtn" disabled>Hang Up</button>
+  </div>
+  
+  <!-- Incoming call notification -->
+  <div id="incomingCallDiv" style="display: none; background: #f0f8ff; padding: 15px; border: 2px solid #4CAF50; border-radius: 5px; margin: 10px 0;">
+    <h3>📞 Incoming Call from Client <span id="callerName"></span></h3>
+    <button id="acceptBtn" style="background: #4CAF50; color: white; padding: 10px 20px; margin: 5px;">Accept</button>
+    <button id="rejectBtn" style="background: #f44336; color: white; padding: 10px 20px; margin: 5px;">Reject</button>
+  </div>
+  
+  <div>
+    <p>Status: <span id="status">Disconnected</span></p>
+    <p>Call State: <span id="callState">No Call</span></p>
+  </div>
   <audio id="remoteAudio" autoplay></audio>
+  
   <script>
-    const id = "b"; // Caller B id
-    const remoteId = "a"; // Talking to Caller A
+    const clientId = "b";
+    const remoteClientId = "a";
+    
+    let ws = null;
+    let pc = null;
+    let localStream = null;
+    
+    const connectBtn = document.getElementById("connectBtn");
+    const callBtn = document.getElementById("callBtn");
+    const hangupBtn = document.getElementById("hangupBtn");
+    const acceptBtn = document.getElementById("acceptBtn");
+    const rejectBtn = document.getElementById("rejectBtn");
+    const incomingCallDiv = document.getElementById("incomingCallDiv");
+    const callerName = document.getElementById("callerName");
+    const status = document.getElementById("status");
+    const callState = document.getElementById("callState");
+    const remoteAudio = document.getElementById("remoteAudio");
 
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-    });
+    // Update UI status
+    function updateStatus(message) {
+      status.textContent = message;
+      console.log("Status:", message);
+    }
 
-    // Debug logs
-    pc.oniceconnectionstatechange = () => console.log("ICE state:", pc.iceConnectionState);
-    pc.onconnectionstatechange = () => console.log("Peer state:", pc.connectionState);
+    function updateCallState(state) {
+      callState.textContent = state;
+      console.log("Call State:", state);
+    }
 
-    // Play remote audio
-    pc.ontrack = event => {
-      console.log("Got remote track:", event.streams);
-      document.getElementById("remoteAudio").srcObject = event.streams[0];
-    };
+    // Get ICE servers configuration from server
+    async function getIceServers() {
+      try {
+        const response = await fetch("http://localhost:8080/ice-servers");
+        const config = await response.json();
+        return config.iceServers;
+      } catch (error) {
+        console.error("Failed to get ICE servers:", error);
+        return [{ urls: "stun:stun.l.google.com:19302" }];
+      }
+    }
 
-    // Send ICE candidates to backend
-    pc.onicecandidate = event => {
-      if (event.candidate) {
-        console.log("Sending candidate:", event.candidate);
-        fetch(`http://localhost:8080/candidate/${id}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(event.candidate.toJSON())
+    // Initialize WebRTC peer connection
+    async function createPeerConnection() {
+      const iceServers = await getIceServers();
+      
+      pc = new RTCPeerConnection({ iceServers });
+
+      // Handle ICE candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+          console.log("Sending ICE candidate to", remoteClientId);
+          ws.send(JSON.stringify({
+            type: "candidate",
+            to: remoteClientId,
+            data: event.candidate.toJSON()
+          }));
+        }
+      };
+
+      // Handle remote stream
+      pc.ontrack = (event) => {
+        console.log("Received remote stream");
+        remoteAudio.srcObject = event.streams[0];
+        updateCallState("Connected - Audio Playing");
+      };
+
+      // Handle connection state changes
+      pc.onconnectionstatechange = () => {
+        console.log("P2P Connection state:", pc.connectionState);
+        if (pc.connectionState === "connected") {
+          updateCallState("P2P Connected");
+        } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+          updateCallState("P2P Disconnected");
+        }
+      };
+
+      // Add local stream
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          pc.addTrack(track, localStream);
         });
       }
-    };
-
-    async function start() {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-      // Create SDP offer
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      console.log("Sending offer:", offer);
-
-      // Send to backend
-      const res = await fetch(`http://localhost:8080/offer/${id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(offer)
-      });
-      const answer = await res.json();
-      console.log("Got answer:", answer);
-      await pc.setRemoteDescription(answer);
-
-      // Wait a bit for the connection to stabilize before polling for candidates
-      console.log("Waiting for connection to stabilize...");
-      setTimeout(() => {
-        console.log("Starting to poll for remote candidates");
-        pollCandidates();
-      }, 3000);
     }
 
-    async function pollCandidates() {
-      setInterval(async () => {
-        try {
-          const res = await fetch(`http://localhost:8080/candidate/${remoteId}`);
-          if (res.ok) {
-            const candidates = await res.json();
-            for (const c of candidates) {
-              console.log("Adding remote candidate:", c);
-              try {
-                // Only add candidate if we have a remote description set
-                if (pc.remoteDescription) {
-                  await pc.addIceCandidate(c);
-                  console.log("Successfully added candidate");
-                } else {
-                  console.log("Skipping candidate - no remote description yet");
-                }
-              } catch (err) {
-                console.error("Error adding candidate:", err);
-              }
-            }
+    // Connect to WebSocket signaling server
+    function connectToServer() {
+      updateStatus("Connecting to server...");
+      
+      ws = new WebSocket(`ws://localhost:8080/ws?id=${clientId}`);
+
+      ws.onopen = () => {
+        updateStatus("Connected to server");
+        connectBtn.disabled = true;
+        callBtn.disabled = false;
+      };
+
+      ws.onclose = () => {
+        updateStatus("Disconnected from server");
+        connectBtn.disabled = false;
+        callBtn.disabled = true;
+        hangupBtn.disabled = true;
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        updateStatus("Connection error");
+      };
+
+      ws.onmessage = async (event) => {
+        const message = JSON.parse(event.data);
+        console.log("Received message:", message);
+
+        if (message.from === remoteClientId) {
+          switch (message.type) {
+            case "call-request":
+              await handleIncomingCall(message.from);
+              break;
+            case "call-accept":
+              await handleCallAccepted();
+              break;
+            case "call-reject":
+              await handleCallRejected();
+              break;
+            case "offer":
+              await handleOffer(message.data);
+              break;
+            case "answer":
+              await handleAnswer(message.data);
+              break;
+            case "candidate":
+              await handleCandidate(message.data);
+              break;
+            case "hangup":
+              await handleRemoteHangup();
+              break;
           }
-        } catch (err) {
-          console.error("Error polling candidates:", err);
         }
-      }, 2000);
+      };
     }
 
-    start();
+    // Handle incoming call request
+    async function handleIncomingCall(from) {
+      console.log("Incoming call from", from);
+      updateCallState("Incoming call...");
+      
+      // Show incoming call UI
+      callerName.textContent = from.toUpperCase();
+      incomingCallDiv.style.display = "block";
+      callBtn.disabled = true;
+    }
+
+    // Handle call acceptance
+    async function handleCallAccepted() {
+      console.log("Call was accepted by", remoteClientId);
+      updateCallState("Call accepted, connecting...");
+      
+      // Now proceed with WebRTC offer/answer exchange
+      await initiateWebRTCCall();
+    }
+
+    // Handle call rejection
+    async function handleCallRejected() {
+      console.log("Call was rejected by", remoteClientId);
+      updateCallState("Call rejected");
+      
+      // Reset UI
+      resetCallUI();
+    }
+
+    // Handle remote hangup
+    async function handleRemoteHangup() {
+      console.log("Remote client hung up");
+      updateCallState("Call ended by remote");
+      
+      // Close our side of the connection
+      hangup(false); // false = don't send hangup message (already received one)
+    }
+
+    // Accept incoming call
+    async function acceptCall() {
+      console.log("Accepting call from", remoteClientId);
+      
+      // Hide incoming call UI
+      incomingCallDiv.style.display = "none";
+      
+      // Send acceptance message
+      ws.send(JSON.stringify({
+        type: "call-accept",
+        to: remoteClientId
+      }));
+      
+      updateCallState("Call accepted, waiting for connection...");
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+      
+      // Get user media ready for when offer comes
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("Got local stream for accepting call");
+      } catch (error) {
+        console.error("Error getting media for accepting call:", error);
+        updateCallState("Failed to get microphone");
+      }
+    }
+
+    // Reject incoming call
+    async function rejectCall() {
+      console.log("Rejecting call from", remoteClientId);
+      
+      // Hide incoming call UI
+      incomingCallDiv.style.display = "none";
+      
+      // Send rejection message
+      ws.send(JSON.stringify({
+        type: "call-reject",
+        to: remoteClientId
+      }));
+      
+      updateCallState("Call rejected");
+      callBtn.disabled = false;
+    }
+
+    // Reset call UI to initial state
+    function resetCallUI() {
+      incomingCallDiv.style.display = "none";
+      callBtn.disabled = false;
+      hangupBtn.disabled = true;
+    }
+
+    // Initiate WebRTC call (after call acceptance)
+    async function initiateWebRTCCall() {
+      try {
+        // Get user media if not already obtained
+        if (!localStream) {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          console.log("Got local stream for WebRTC call");
+        }
+
+        // Create peer connection
+        await createPeerConnection();
+
+        // Create offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Send offer to remote client
+        ws.send(JSON.stringify({
+          type: "offer",
+          to: remoteClientId,
+          data: offer
+        }));
+
+        updateCallState("Sending offer...");
+
+      } catch (error) {
+        console.error("Error initiating WebRTC call:", error);
+        updateCallState("Call failed: " + error.message);
+      }
+    }
+
+    // Handle incoming offer (Client B becomes answerer)
+    async function handleOffer(offer) {
+      console.log("Received offer from", remoteClientId);
+      updateCallState("Received offer, creating answer...");
+
+      if (!pc) await createPeerConnection();
+
+      await pc.setRemoteDescription(offer);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      // Send answer back
+      ws.send(JSON.stringify({
+        type: "answer",
+        to: remoteClientId,
+        data: answer
+      }));
+
+      updateCallState("Answer sent, connecting...");
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+    }
+
+    // Handle incoming answer
+    async function handleAnswer(answer) {
+      console.log("Received answer from", remoteClientId);
+      await pc.setRemoteDescription(answer);
+      updateCallState("Call connected");
+    }
+
+    // Handle incoming ICE candidate
+    async function handleCandidate(candidate) {
+      console.log("Received ICE candidate from", remoteClientId);
+      if (pc && pc.remoteDescription) {
+        await pc.addIceCandidate(candidate);
+      }
+    }
+
+    // Initiate call (Client B becomes caller)
+    async function makeCall() {
+      try {
+        updateCallState("Requesting call...");
+
+        // Send call request first
+        ws.send(JSON.stringify({
+          type: "call-request",
+          to: remoteClientId
+        }));
+
+        updateCallState("Calling...");
+        callBtn.disabled = true;
+
+      } catch (error) {
+        console.error("Error making call:", error);
+        updateCallState("Call failed: " + error.message);
+        callBtn.disabled = false;
+      }
+    }
+
+    // Hang up call
+    function hangup(sendHangupMessage = true) {
+      console.log("Hanging up call");
+
+      // Send hangup message to remote client (unless we're hanging up due to remote hangup)
+      if (sendHangupMessage && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "hangup",
+          to: remoteClientId
+        }));
+      }
+
+      // Close peer connection
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+
+      // Stop local stream
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+
+      // Clear remote audio
+      remoteAudio.srcObject = null;
+      
+      // Reset UI
+      updateCallState("Call ended");
+      resetCallUI();
+    }
+
+    // Event listeners
+    connectBtn.addEventListener("click", connectToServer);
+    callBtn.addEventListener("click", makeCall);
+    hangupBtn.addEventListener("click", () => hangup(true));
+    acceptBtn.addEventListener("click", acceptCall);
+    rejectBtn.addEventListener("click", rejectCall);
+
+    console.log("Client B initialized");
   </script>
 </body>
 </html>
