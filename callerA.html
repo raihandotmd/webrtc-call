@@ -57,23 +57,37 @@
       console.log("Got answer:", answer);
       await pc.setRemoteDescription(answer);
 
-      // Poll for remote ICE candidates
-      pollCandidates();
+      // Wait a bit for the connection to stabilize before polling for candidates
+      console.log("Waiting for connection to stabilize...");
+      setTimeout(() => {
+        console.log("Starting to poll for remote candidates");
+        pollCandidates();
+      }, 3000);
     }
 
     async function pollCandidates() {
       setInterval(async () => {
-        const res = await fetch(`http://localhost:8080/candidate/${remoteId}`);
-        if (res.ok) {
-          const candidates = await res.json();
-          for (const c of candidates) {
-            console.log("Adding remote candidate:", c);
-            try {
-              await pc.addIceCandidate(c);
-            } catch (err) {
-              console.error("Error adding candidate:", err);
+        try {
+          const res = await fetch(`http://localhost:8080/candidate/${remoteId}`);
+          if (res.ok) {
+            const candidates = await res.json();
+            for (const c of candidates) {
+              console.log("Adding remote candidate:", c);
+              try {
+                // Only add candidate if we have a remote description set
+                if (pc.remoteDescription) {
+                  await pc.addIceCandidate(c);
+                  console.log("Successfully added candidate");
+                } else {
+                  console.log("Skipping candidate - no remote description yet");
+                }
+              } catch (err) {
+                console.error("Error adding candidate:", err);
+              }
             }
           }
+        } catch (err) {
+          console.error("Error polling candidates:", err);
         }
       }, 2000);
     }

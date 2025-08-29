@@ -16,11 +16,12 @@ var (
 	pendingCandidatesA []webrtc.ICECandidateInit
 	pendingCandidatesB []webrtc.ICECandidateInit
 
-	// Pre-created local tracks to send audio to peers:
-	// localTrackToA: server -> A (receives audio from B)
-	// localTrackToB: server -> B (receives audio from A)
 	localTrackToA *webrtc.TrackLocalStaticRTP
 	localTrackToB *webrtc.TrackLocalStaticRTP
+
+	// Store candidates to send to the other peer
+	candidatesForA []map[string]interface{}
+	candidatesForB []map[string]interface{}
 )
 
 // CORS middleware
@@ -271,26 +272,53 @@ func main() {
 			return
 		}
 
-		var body struct {
-			Candidate string `json:"candidate"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid candidate", http.StatusBadRequest)
+		if r.Method == http.MethodGet {
+			// Client A is asking for candidates from B
+			w.Header().Set("Content-Type", "application/json")
+			if candidatesForA == nil {
+				candidatesForA = []map[string]interface{}{}
+			}
+			json.NewEncoder(w).Encode(candidatesForA)
+			candidatesForA = nil // Clear after sending
 			return
 		}
 
-		if pcA == nil {
-			http.Error(w, "PeerConnection A not ready", http.StatusBadRequest)
+		if r.Method == http.MethodPost {
+			// Client A is sending its candidates (to be forwarded to B)
+			var candidateData map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&candidateData); err != nil {
+				http.Error(w, "invalid candidate", http.StatusBadRequest)
+				return
+			}
+
+			// Convert to webrtc.ICECandidateInit for local processing
+			ice := webrtc.ICECandidateInit{}
+			if candidate, ok := candidateData["candidate"].(string); ok {
+				ice.Candidate = candidate
+			}
+			if sdpMid, ok := candidateData["sdpMid"].(string); ok {
+				ice.SDPMid = &sdpMid
+			}
+			if sdpMLineIndex, ok := candidateData["sdpMLineIndex"].(float64); ok {
+				index := uint16(sdpMLineIndex)
+				ice.SDPMLineIndex = &index
+			}
+
+			if pcA != nil {
+				if err := pcA.AddICECandidate(ice); err != nil {
+					fmt.Println("[A] AddICECandidate error:", err)
+				}
+			} else {
+				pendingCandidatesA = append(pendingCandidatesA, ice)
+			}
+
+			// Store the original candidate data to send to B
+			candidatesForB = append(candidatesForB, candidateData)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		ice := webrtc.ICECandidateInit{Candidate: body.Candidate}
-		if err := pcA.AddICECandidate(ice); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	mux.HandleFunc("/candidate/b", func(w http.ResponseWriter, r *http.Request) {
@@ -299,26 +327,53 @@ func main() {
 			return
 		}
 
-		var body struct {
-			Candidate string `json:"candidate"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid candidate", http.StatusBadRequest)
+		if r.Method == http.MethodGet {
+			// Client B is asking for candidates from A
+			w.Header().Set("Content-Type", "application/json")
+			if candidatesForB == nil {
+				candidatesForB = []map[string]interface{}{}
+			}
+			json.NewEncoder(w).Encode(candidatesForB)
+			candidatesForB = nil // Clear after sending
 			return
 		}
 
-		if pcB == nil {
-			http.Error(w, "PeerConnection B not ready", http.StatusBadRequest)
+		if r.Method == http.MethodPost {
+			// Client B is sending its candidates (to be forwarded to A)
+			var candidateData map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&candidateData); err != nil {
+				http.Error(w, "invalid candidate", http.StatusBadRequest)
+				return
+			}
+
+			// Convert to webrtc.ICECandidateInit for local processing
+			ice := webrtc.ICECandidateInit{}
+			if candidate, ok := candidateData["candidate"].(string); ok {
+				ice.Candidate = candidate
+			}
+			if sdpMid, ok := candidateData["sdpMid"].(string); ok {
+				ice.SDPMid = &sdpMid
+			}
+			if sdpMLineIndex, ok := candidateData["sdpMLineIndex"].(float64); ok {
+				index := uint16(sdpMLineIndex)
+				ice.SDPMLineIndex = &index
+			}
+
+			if pcB != nil {
+				if err := pcB.AddICECandidate(ice); err != nil {
+					fmt.Println("[B] AddICECandidate error:", err)
+				}
+			} else {
+				pendingCandidatesB = append(pendingCandidatesB, ice)
+			}
+
+			// Store the original candidate data to send to A
+			candidatesForA = append(candidatesForA, candidateData)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		ice := webrtc.ICECandidateInit{Candidate: body.Candidate}
-		if err := pcB.AddICECandidate(ice); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	fmt.Println("Server started at :8080")
