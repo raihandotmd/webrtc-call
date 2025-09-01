@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -18,14 +20,16 @@ type Client struct {
 
 // Hub maintains active clients and handles message broadcasting
 type Hub struct {
-	Clients    map[string]*Client
-	Register   chan *Client
-	Unregister chan *Client
+	Clients           map[string]*Client
+	Register          chan *Client
+	Unregister        chan *Client
+	ICERequestLimiter map[string]time.Time
+	ICELimiterMutex   sync.RWMutex
 }
 
 // SignalingMessage represents WebRTC signaling data
 type SignalingMessage struct {
-	Type string      `json:"type"` // "offer", "answer", "candidate", "call-request", "call-accept", "call-reject", "hangup"
+	Type string      `json:"type"` // "offer", "answer", "candidate", "call-request", "call-accept", "call-reject", "hangup", "ice-servers-request", "ice-servers-response"
 	To   string      `json:"to"`
 	From string      `json:"from"`
 	Data interface{} `json:"data"`
@@ -34,9 +38,11 @@ type SignalingMessage struct {
 // NewHub creates a new Hub instance
 func NewHub() *Hub {
 	return &Hub{
-		Clients:    make(map[string]*Client),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
+		Clients:           make(map[string]*Client),
+		Register:          make(chan *Client),
+		Unregister:        make(chan *Client),
+		ICERequestLimiter: make(map[string]time.Time),
+		ICELimiterMutex:   sync.RWMutex{},
 	}
 }
 
@@ -65,6 +71,41 @@ func (h *Hub) SendToClient(clientID string, message []byte) error {
 	}
 	log.Printf("Client %s not found", clientID)
 	return nil
+}
+
+// CheckICERequestRateLimit checks if client can request ICE servers
+func (h *Hub) CheckICERequestRateLimit(clientID string) bool {
+	h.ICELimiterMutex.Lock()
+	defer h.ICELimiterMutex.Unlock()
+
+	lastRequest, exists := h.ICERequestLimiter[clientID]
+	if exists && time.Since(lastRequest) < 30*time.Second {
+		return false // Rate limited
+	}
+
+	h.ICERequestLimiter[clientID] = time.Now()
+	return true
+}
+
+// GenerateICEServers generates ICE servers configuration for a client
+func (h *Hub) GenerateICEServers(clientID string) interface{} {
+	return fiber.Map{
+		"iceServers": []fiber.Map{
+			// STUN servers for NAT discovery (multiple for redundancy)
+			{"urls": "stun:stun.l.google.com:19302"},
+			{"urls": "stun:stun1.l.google.com:19302"},
+
+			// TURN server (static credentials for now - you can implement dynamic later)
+			{
+				"urls":       "turn:localhost:3478",
+				"username":   "testuser",
+				"credential": "testpass",
+			},
+
+			// TODO: Implement dynamic TURN credentials here
+			// This is where you'll add your dynamic credential generation
+		},
+	}
 }
 
 func main() {
@@ -136,52 +177,59 @@ func main() {
 
 			log.Printf("Received %s message from %s to %s", msg.Type, msg.From, msg.To)
 
-			// Forward message to target client
-			if msg.To != "" {
-				msgBytes, err := json.Marshal(msg)
-				if err != nil {
-					log.Printf("JSON marshal error: %v", err)
+			// Handle different message types
+			switch msg.Type {
+			case "ice-servers-request":
+				// Check rate limiting
+				if !hub.CheckICERequestRateLimit(clientID) {
+					log.Printf("ICE servers request rate limited for client %s", clientID)
+					errorResponse := SignalingMessage{
+						Type: "ice-servers-error",
+						To:   clientID,
+						Data: fiber.Map{"error": "Rate limited. Please wait before requesting again."},
+					}
+					errorBytes, _ := json.Marshal(errorResponse)
+					hub.SendToClient(clientID, errorBytes)
 					continue
 				}
 
-				if err := hub.SendToClient(msg.To, msgBytes); err != nil {
-					log.Printf("Error sending to client %s: %v", msg.To, err)
+				// Generate ICE servers for this client
+				iceServers := hub.GenerateICEServers(clientID)
+				response := SignalingMessage{
+					Type: "ice-servers-response",
+					To:   clientID,
+					Data: iceServers,
+				}
+
+				responseBytes, err := json.Marshal(response)
+				if err != nil {
+					log.Printf("Error marshaling ICE servers response: %v", err)
+					continue
+				}
+
+				if err := hub.SendToClient(clientID, responseBytes); err != nil {
+					log.Printf("Error sending ICE servers to client %s: %v", clientID, err)
+				}
+
+			default:
+				// Forward other signaling messages to target client
+				if msg.To != "" {
+					msgBytes, err := json.Marshal(msg)
+					if err != nil {
+						log.Printf("JSON marshal error: %v", err)
+						continue
+					}
+
+					if err := hub.SendToClient(msg.To, msgBytes); err != nil {
+						log.Printf("Error sending to client %s: %v", msg.To, err)
+					}
 				}
 			}
 		}
 	}))
 
-	// ICE servers endpoint
-	app.Get("/ice-servers", func(c *fiber.Ctx) error {
-		iceServers := fiber.Map{
-			"iceServers": []fiber.Map{
-				// STUN servers for NAT discovery (multiple for redundancy)
-				{"urls": "stun:stun.l.google.com:19302"},
-				{"urls": "stun:stun1.l.google.com:19302"},
-
-				// TURN server (now running via Docker)
-				{
-					"urls":       "turn:localhost:3478",
-					"username":   "testuser",
-					"credential": "testpass",
-				},
-
-				// Uncomment and configure these when you have actual TURN servers:
-				// {
-				// 	"urls":       "turn:your-turn-server.com:3478",
-				// 	"username":   "your-username",
-				// 	"credential": "your-password",
-				// },
-				// For TURNS (secure TURN):
-				// {
-				// 	"urls":       "turns:your-turn-server.com:5349",
-				// 	"username":   "your-username",
-				// 	"credential": "your-password",
-				// },
-			},
-		}
-		return c.JSON(iceServers)
-	})
+	// ICE servers are now provided via WebSocket for better security
+	// No HTTP endpoint exposed
 
 	// Serve static files
 	app.Get("/", func(c *fiber.Ctx) error {

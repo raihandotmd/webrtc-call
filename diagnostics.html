@@ -20,6 +20,8 @@
   <h1>🔧 WebRTC ICE Diagnostics</h1>
   
   <div>
+    <p><strong>⚠️ Note:</strong> ICE servers are now provided via authenticated WebSocket connections for security.</p>
+    <p>This diagnostic tool now only tests basic WebRTC connectivity with fallback STUN servers.</p>
     <button id="testBtn" class="primary">🧪 Run ICE Test</button>
     <button id="clearBtn" class="danger">🗑️ Clear Results</button>
   </div>
@@ -49,10 +51,15 @@
       addResult('info', '🚀 Starting ICE Diagnostics', 'Testing WebRTC connectivity...');
       
       try {
-        // 1. Test ICE servers configuration
-        const response = await fetch('/ice-servers');
-        const config = await response.json();
-        addResult('success', '✅ ICE Servers Config Retrieved', `Found ${config.iceServers.length} ICE servers`);
+        // 1. Use fallback ICE servers configuration (no HTTP endpoint available)
+        const config = {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" }
+          ]
+        };
+        
+        addResult('info', '🔧 ICE Servers Config', 'Using fallback STUN servers for diagnostics');
         addCode(JSON.stringify(config, null, 2));
         
         // 2. Create test peer connection

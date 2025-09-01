@@ -126,21 +126,49 @@
       }
     }
 
-    // Get ICE servers configuration from server
-    async function getIceServers() {
-      try {
-        const response = await fetch(`${httpProtocol}//${currentHost}/ice-servers`);
-        const config = await response.json();
-        return config.iceServers;
-      } catch (error) {
-        console.error("Failed to get ICE servers:", error);
-        return [{ urls: "stun:stun.l.google.com:19302" }];
-      }
+    // Request ICE servers configuration via WebSocket
+    function requestIceServers() {
+      return new Promise((resolve, reject) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          console.error("WebSocket not connected, using fallback STUN server");
+          resolve([{ urls: "stun:stun.l.google.com:19302" }]);
+          return;
+        }
+
+        // Set up one-time listener for ICE servers response
+        const handleICEResponse = (event) => {
+          const message = JSON.parse(event.data);
+          if (message.type === 'ice-servers-response') {
+            ws.removeEventListener('message', handleICEResponse);
+            console.log("Received ICE servers via WebSocket");
+            resolve(message.data.iceServers);
+          } else if (message.type === 'ice-servers-error') {
+            ws.removeEventListener('message', handleICEResponse);
+            console.error("ICE servers request error:", message.data.error);
+            // Use fallback STUN server
+            resolve([{ urls: "stun:stun.l.google.com:19302" }]);
+          }
+        };
+        
+        ws.addEventListener('message', handleICEResponse);
+        
+        // Request ICE servers via WebSocket
+        ws.send(JSON.stringify({
+          type: 'ice-servers-request'
+        }));
+        
+        // Timeout after 5 seconds
+        setTimeout(() => {
+          ws.removeEventListener('message', handleICEResponse);
+          console.warn("ICE servers request timeout, using fallback");
+          resolve([{ urls: "stun:stun.l.google.com:19302" }]);
+        }, 5000);
+      });
     }
 
     // Initialize WebRTC peer connection
     async function createPeerConnection() {
-      const iceServers = await getIceServers();
+      const iceServers = await requestIceServers();
       
       pc = new RTCPeerConnection({ 
         iceServers,
@@ -290,6 +318,12 @@
       ws.onmessage = async (event) => {
         const message = JSON.parse(event.data);
         console.log("Received message:", message);
+
+        // Handle ICE servers response (no sender validation needed)
+        if (message.type === 'ice-servers-response' || message.type === 'ice-servers-error') {
+          // These are handled by the requestIceServers promise
+          return;
+        }
 
         if (message.from === remoteClientId) {
           switch (message.type) {
