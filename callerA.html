@@ -59,10 +59,25 @@
       console.log("Call State:", state);
     }
 
-    // Get current host for dynamic URL construction
-    const currentHost = window.location.host; // Gets hostname:port from current URL
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const httpProtocol = window.location.protocol;
+    // Configuration - Update these for different environments
+    const CONFIG = {
+      // For local development
+      LOCAL: {
+        host: window.location.hostname + ':8081',
+        protocol: 'ws:'
+      },
+      // For ngrok tunnel
+      NGROK: {
+        host: '5715bbea92bf.ngrok-free.app',
+        protocol: 'wss:'
+      }
+    };
+    
+    // Switch between LOCAL and NGROK here
+    const CURRENT_ENV = 'NGROK'; // Change to 'LOCAL' for local development
+    
+    const proxyHost = CONFIG[CURRENT_ENV].host;
+    const wsProtocol = CONFIG[CURRENT_ENV].protocol;
 
     // Check and request microphone permissions early
     async function checkMicrophonePermission() {
@@ -317,7 +332,7 @@
       updateStatus("Connecting to server...");
       
       // Connect to WebSocket proxy server with userId parameter
-      ws = new WebSocket(`ws://localhost:8081/ws?userId=${clientId}`);
+      ws = new WebSocket(`${wsProtocol}//${proxyHost}/ws?userId=${clientId}`);
 
       ws.onopen = () => {
         updateStatus("Connected to server");
@@ -439,32 +454,6 @@
             console.log("Ignoring ICE candidate from unexpected sender:", senderId);
           }
           return;
-        }
-
-        if (message.from === remoteClientId) {
-          switch (message.type) {
-            case "call-request":
-              await handleIncomingCall(message.from);
-              break;
-            case "call-accept":
-              await handleCallAccepted();
-              break;
-            case "call-reject":
-              await handleCallRejected(); // refactor
-              break;
-            case "offer":
-              await handleOffer(message.data);
-              break;
-            case "answer":
-              await handleAnswer(message.data);
-              break;
-            case "candidate":
-              await handleCandidate(message.data);
-              break;
-            case "hangup":
-              await handleRemoteHangup();
-              break;
-          }
         }
       };
     }
