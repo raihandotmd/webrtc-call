@@ -74,7 +74,7 @@
     };
     
     // Switch between LOCAL and NGROK here
-    const CURRENT_ENV = 'NGROK'; // Change to 'LOCAL' for local development
+    const CURRENT_ENV = 'LOCAL'; // Change to 'LOCAL' for local development
     
     const proxyHost = CONFIG[CURRENT_ENV].host;
     const wsProtocol = CONFIG[CURRENT_ENV].protocol;
@@ -185,7 +185,7 @@
         
         ws.addEventListener('message', handleICEResponse);
         
-        // Request ICE servers via WebSocket
+        
         ws.send(JSON.stringify({
           event: 'call_ice_servers_request',
           data: {}
@@ -380,11 +380,10 @@
         if (message.event === "call_request" && message.data && message.data.sender_id) {
           console.log("Received incoming call request from server:", message);
           const senderId = message.data.sender_id.toString();
-          const callMessage = message.data.message;
           
           // Only handle calls from the expected remote client
           if (senderId === remoteClientId) {
-            console.log("Incoming call from user", senderId, "with message:", callMessage);
+            console.log("Incoming call from user", senderId);
             await handleIncomingCall(senderId);
           } else {
             console.log("Ignoring call from unexpected sender:", senderId);
@@ -392,50 +391,43 @@
           return;
         }
 
-        // Handle incoming call_accept from server
-        if (message.event === "call_accept" && message.data && message.data.sender_id) {
-          console.log("Received call accept from server:", message);
+        // Handle incoming call_answer from server
+        if (message.event === "call_answer" && message.data && message.data.sender_id) {
+          console.log("Received call answer from server:", message);
           const senderId = message.data.sender_id.toString();
-          const acceptMessage = message.data.message;
+          const answerMessage = message.data.message;
           
-          // Only handle accept from the expected remote client
+          // Only handle answer from the expected remote client
           if (senderId === remoteClientId) {
-            console.log("Call accepted by user", senderId, "with message:", acceptMessage);
-            await handleCallAccepted();
+            if (answerMessage && answerMessage.answer === true) {
+              console.log("Call accepted by user", senderId);
+              await handleCallAccepted();
+            } else {
+              console.log("Call rejected by user", senderId);
+              await handleCallRejected();
+            }
           } else {
-            console.log("Ignoring call accept from unexpected sender:", senderId);
+            console.log("Ignoring call answer from unexpected sender:", senderId);
           }
           return;
         }
 
-        // Handle incoming call_sdp_offer from server
-        if (message.event === "call_sdp_offer" && message.data && message.data.sender_id) {
-          console.log("Received SDP offer from server:", message);
+        // Handle incoming call_sdp_exchange from server
+        if (message.event === "call_sdp_exchange" && message.data && message.data.sender_id) {
+          console.log("Received SDP exchange from server:", message);
           const senderId = message.data.sender_id.toString();
-          const sdpOffer = message.data.message.sdp_offer;
+          const sdpExchange = message.data.message.sdp_exchange;
           
-          // Only handle offers from the expected remote client
+          // Only handle SDP from the expected remote client
           if (senderId === remoteClientId) {
-            console.log("SDP offer from user", senderId);
-            await handleOffer(sdpOffer);
+            console.log("SDP exchange from user", senderId, "type:", sdpExchange.type);
+            if (sdpExchange.type === "offer") {
+              await handleOffer(sdpExchange);
+            } else if (sdpExchange.type === "answer") {
+              await handleAnswer(sdpExchange);
+            }
           } else {
-            console.log("Ignoring SDP offer from unexpected sender:", senderId);
-          }
-          return;
-        }
-
-        // Handle incoming call_sdp_answer from server
-        if (message.event === "call_sdp_answer" && message.data && message.data.sender_id) {
-          console.log("Received SDP answer from server:", message);
-          const senderId = message.data.sender_id.toString();
-          const sdpAnswer = message.data.message.sdp_answer;
-          
-          // Only handle answers from the expected remote client
-          if (senderId === remoteClientId) {
-            console.log("SDP answer from user", senderId);
-            await handleAnswer(sdpAnswer);
-          } else {
-            console.log("Ignoring SDP answer from unexpected sender:", senderId);
+            console.log("Ignoring SDP exchange from unexpected sender:", senderId);
           }
           return;
         }
@@ -452,6 +444,21 @@
             await handleCandidate(candidate);
           } else {
             console.log("Ignoring ICE candidate from unexpected sender:", senderId);
+          }
+          return;
+        }
+
+        // Handle incoming call_hangup from server
+        if (message.event === "call_hangup" && message.data && message.data.sender_id) {
+          console.log("Received call hangup from server:", message);
+          const senderId = message.data.sender_id.toString();
+          
+          // Only handle hangup from the expected remote client
+          if (senderId === remoteClientId) {
+            console.log("Call hangup from user", senderId);
+            await handleRemoteHangup();
+          } else {
+            console.log("Ignoring call hangup from unexpected sender:", senderId);
           }
           return;
         }
@@ -508,13 +515,13 @@
       // Hide incoming call UI
       incomingCallDiv.style.display = "none";
       
-      // Send acceptance message
+      // Send acceptance message using call_answer event
       ws.send(JSON.stringify({
-        event: "call_accept",
+        event: "call_answer",
         data: {
           receiver_id: parseInt(remoteClientId),
           message: {
-            note: "Call accepted by Client A"
+            answer: true
           }
         }
       }));
@@ -551,10 +558,15 @@
       // Hide incoming call UI
       incomingCallDiv.style.display = "none";
       
-      // Send rejection message
+      // Send rejection message using call_answer event
       ws.send(JSON.stringify({
-        type: "call-reject",
-        to: remoteClientId
+        event: "call_answer",
+        data: {
+          receiver_id: parseInt(remoteClientId),
+          message: {
+            answer: false
+          }
+        }
       }));
       
       updateCallState("Call rejected");
@@ -605,13 +617,13 @@
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        // Send offer to remote client
+        // Send offer to remote client using SDP exchange
         ws.send(JSON.stringify({
-          event: "call_sdp_offer",
+          event: "call_sdp_exchange",
           data: {
             receiver_id: parseInt(remoteClientId),
             message: {
-              sdp_offer: offer
+              sdp_exchange: offer
             }
           }
         }));
@@ -640,13 +652,13 @@
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
-      // Send answer back
+      // Send answer back using SDP exchange
       ws.send(JSON.stringify({
-        event: "call_sdp_answer",
+        event: "call_sdp_exchange",
         data: {
           receiver_id: parseInt(remoteClientId),
           message: {
-            sdp_answer: answer
+            sdp_exchange: answer
           }
         }
       }));
@@ -711,14 +723,11 @@
       try {
         updateCallState("Requesting call...");
 
-        // Send call request first
+        // Send call request (simplified format)
         ws.send(JSON.stringify({
           event: "call_request",
           data: {
-            receiver_id: parseInt(remoteClientId),
-            message: {
-              note: "Incoming call from Client A"
-            }
+            receiver_id: parseInt(remoteClientId)
           }
         }));
 
@@ -739,8 +748,10 @@
       // Send hangup message to remote client (unless we're hanging up due to remote hangup)
       if (sendHangupMessage && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-          type: "hangup",
-          to: remoteClientId
+          event: "call_hangup",
+          data: {
+            receiver_id: parseInt(remoteClientId)
+          }
         }));
       }
 
