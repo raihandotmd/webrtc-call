@@ -27,8 +27,8 @@
   <audio id="remoteAudio" autoplay></audio>
   
   <script>
-    const clientId = "b";
-    const remoteClientId = "a";
+    const clientId = "2";
+    const remoteClientId = "1";
     
     let ws = null;
     let pc = null;
@@ -138,13 +138,31 @@
         // Set up one-time listener for ICE servers response
         const handleICEResponse = (event) => {
           const message = JSON.parse(event.data);
-          if (message.type === 'ice-servers-response') {
+          if (message.success && message.data.event === 'call_ice_servers_response') {
             ws.removeEventListener('message', handleICEResponse);
             console.log("Received ICE servers via WebSocket");
-            resolve(message.data.iceServers);
-          } else if (message.type === 'ice-servers-error') {
+            
+            // Transform backend response to WebRTC format
+            const iceServers = message.data.data.ice_servers.map(server => {
+              const transformedServer = {
+                urls: server.urls
+              };
+              
+              if (server.username) {
+                transformedServer.username = server.username;
+              }
+              if (server.credential) {
+                transformedServer.credential = server.credential;
+              }
+              
+              console.log("Transformed ICE server:", transformedServer);
+              return transformedServer;
+            });
+            
+            resolve(iceServers);
+          } else if (!message.success) {
             ws.removeEventListener('message', handleICEResponse);
-            console.error("ICE servers request error:", message.data.error);
+            console.error("ICE servers request error:", message.error);
             // Use fallback STUN server
             resolve([{ urls: "stun:stun.l.google.com:19302" }]);
           }
@@ -154,7 +172,8 @@
         
         // Request ICE servers via WebSocket
         ws.send(JSON.stringify({
-          type: 'ice-servers-request'
+          event: 'call_ice_servers_request',
+          data: {}
         }));
         
         // Timeout after 5 seconds
@@ -198,9 +217,13 @@
         if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
           console.log("Sending ICE candidate to", remoteClientId);
           ws.send(JSON.stringify({
-            type: "candidate",
-            to: remoteClientId,
-            data: event.candidate.toJSON()
+            event: "call_ice_candidate",
+            data: {
+              receiver_id: parseInt(remoteClientId),
+              message: {
+                candidate: event.candidate.toJSON()
+              }
+            }
           }));
         }
       };
@@ -263,9 +286,13 @@
           console.log("Generated ICE candidate:", event.candidate.type, event.candidate.candidate);
           if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
-              type: "candidate",
-              to: remoteClientId,
-              data: event.candidate.toJSON()
+              event: "call_ice_candidate",
+              data: {
+                receiver_id: parseInt(remoteClientId),
+                message: {
+                  candidate: event.candidate.toJSON()
+                }
+              }
             }));
           } else {
             console.error("Cannot send ICE candidate: WebSocket not open");
@@ -295,7 +322,8 @@
       
       updateStatus("Connecting to server...");
       
-      ws = new WebSocket(`${wsProtocol}//${currentHost}/ws?id=${clientId}`);
+      // Connect to WebSocket proxy server with userId parameter
+      ws = new WebSocket(`ws://localhost:8081/ws?userId=${clientId}`);
 
       ws.onopen = () => {
         updateStatus("Connected to server");
@@ -320,8 +348,102 @@
         console.log("Received message:", message);
 
         // Handle ICE servers response (no sender validation needed)
-        if (message.type === 'ice-servers-response' || message.type === 'ice-servers-error') {
+        if (message.success && message.data && message.data.event === 'call_ice_servers_response') {
           // These are handled by the requestIceServers promise
+          return;
+        }
+
+        // Handle call_request response from server
+        if (message.success !== undefined && message.metadata && message.metadata.request_id) {
+          console.log("Received API response:", message);
+          if (message.success) {
+            console.log("Call request sent successfully to server");
+          } else {
+            console.error("Call request failed:", message.error);
+            updateCallState("Call failed");
+            callBtn.disabled = false;
+            hangupBtn.disabled = true;
+          }
+          return;
+        }
+
+        // Handle incoming call_request from server
+        if (message.event === "call_request" && message.data && message.data.sender_id) {
+          console.log("Received incoming call request from server:", message);
+          const senderId = message.data.sender_id.toString();
+          const callMessage = message.data.message;
+          
+          // Only handle calls from the expected remote client
+          if (senderId === remoteClientId) {
+            console.log("Incoming call from user", senderId, "with message:", callMessage);
+            await handleIncomingCall(senderId);
+          } else {
+            console.log("Ignoring call from unexpected sender:", senderId);
+          }
+          return;
+        }
+
+        // Handle incoming call_accept from server
+        if (message.event === "call_accept" && message.data && message.data.sender_id) {
+          console.log("Received call accept from server:", message);
+          const senderId = message.data.sender_id.toString();
+          const acceptMessage = message.data.message;
+          
+          // Only handle accept from the expected remote client
+          if (senderId === remoteClientId) {
+            console.log("Call accepted by user", senderId, "with message:", acceptMessage);
+            await handleCallAccepted();
+          } else {
+            console.log("Ignoring call accept from unexpected sender:", senderId);
+          }
+          return;
+        }
+
+        // Handle incoming call_sdp_offer from server
+        if (message.event === "call_sdp_offer" && message.data && message.data.sender_id) {
+          console.log("Received SDP offer from server:", message);
+          const senderId = message.data.sender_id.toString();
+          const sdpOffer = message.data.message.sdp_offer;
+          
+          // Only handle offers from the expected remote client
+          if (senderId === remoteClientId) {
+            console.log("SDP offer from user", senderId);
+            await handleOffer(sdpOffer);
+          } else {
+            console.log("Ignoring SDP offer from unexpected sender:", senderId);
+          }
+          return;
+        }
+
+        // Handle incoming call_sdp_answer from server
+        if (message.event === "call_sdp_answer" && message.data && message.data.sender_id) {
+          console.log("Received SDP answer from server:", message);
+          const senderId = message.data.sender_id.toString();
+          const sdpAnswer = message.data.message.sdp_answer;
+          
+          // Only handle answers from the expected remote client
+          if (senderId === remoteClientId) {
+            console.log("SDP answer from user", senderId);
+            await handleAnswer(sdpAnswer);
+          } else {
+            console.log("Ignoring SDP answer from unexpected sender:", senderId);
+          }
+          return;
+        }
+
+        // Handle incoming call_ice_candidate from server
+        if (message.event === "call_ice_candidate" && message.data && message.data.sender_id) {
+          console.log("Received ICE candidate from server:", message);
+          const senderId = message.data.sender_id.toString();
+          const candidate = message.data.message.candidate;
+          
+          // Only handle candidates from the expected remote client
+          if (senderId === remoteClientId) {
+            console.log("ICE candidate from user", senderId);
+            await handleCandidate(candidate);
+          } else {
+            console.log("Ignoring ICE candidate from unexpected sender:", senderId);
+          }
           return;
         }
 
@@ -405,8 +527,13 @@
       
       // Send acceptance message
       ws.send(JSON.stringify({
-        type: "call-accept",
-        to: remoteClientId
+        event: "call_accept",
+        data: {
+          receiver_id: parseInt(remoteClientId),
+          message: {
+            note: "Call accepted by Client B"
+          }
+        }
       }));
       
       updateCallState("Call accepted, waiting for connection...");
@@ -497,9 +624,13 @@
 
         // Send offer to remote client
         ws.send(JSON.stringify({
-          type: "offer",
-          to: remoteClientId,
-          data: offer
+          event: "call_sdp_offer",
+          data: {
+            receiver_id: parseInt(remoteClientId),
+            message: {
+              sdp_offer: offer
+            }
+          }
         }));
 
         updateCallState("Sending offer...");
@@ -529,9 +660,13 @@
 
       // Send answer back
       ws.send(JSON.stringify({
-        type: "answer",
-        to: remoteClientId,
-        data: answer
+        event: "call_sdp_answer",
+        data: {
+          receiver_id: parseInt(remoteClientId),
+          message: {
+            sdp_answer: answer
+          }
+        }
       }));
 
       updateCallState("Answer sent, connecting...");
@@ -596,8 +731,13 @@
 
         // Send call request first
         ws.send(JSON.stringify({
-          type: "call-request",
-          to: remoteClientId
+          event: "call_request",
+          data: {
+            receiver_id: parseInt(remoteClientId),
+            message: {
+              note: "Incoming call from Client B"
+            }
+          }
         }));
 
         updateCallState("Calling...");
