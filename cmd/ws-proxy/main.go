@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 
 	fastws "github.com/fasthttp/websocket"
 	"github.com/gofiber/fiber/v2"
@@ -12,9 +13,10 @@ import (
 )
 
 const (
-	BackendWSURL = "ws://localhost:8082/communication/v1/ws"
+	BackendWSURL = "wss://api-stag.superapi.my.id/websocket/v1/ws"
 	ProxyPort    = ":8081"
-	DebugMode    = true // Set to false to reduce message logging
+	DebugMode    = true                        // Set to false to reduce message logging
+	DeviceID     = "webrtc-client-browser-001" // Hardcoded device ID
 )
 
 type ProxyServer struct {
@@ -29,7 +31,7 @@ func NewProxyServer() *ProxyServer {
 	// Enable CORS
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
-		AllowHeaders: "Origin, Content-Type, Accept, Authorization, X-User-Id",
+		AllowHeaders: "Origin, Content-Type, Accept, Authorization, X-Device-Id",
 		AllowMethods: "GET, POST, PUT, DELETE, OPTIONS",
 	}))
 
@@ -51,15 +53,23 @@ func (ps *ProxyServer) setupRoutes() {
 	ps.app.Use("/ws", func(c *fiber.Ctx) error {
 		// Check for websocket upgrade
 		if websocket.IsWebSocketUpgrade(c) {
-			// Extract and store user ID from query params or headers
-			userID := c.Query("userId")
-			if userID == "" {
-				userID = c.Get("X-User-Id")
-			}
-			if userID == "" {
-				return c.Status(400).SendString("Missing userId parameter or X-User-Id header")
+			// Extract Authorization token and user ID from query params
+			authToken := c.Query("token")
+			if authToken == "" {
+				return c.Status(401).SendString("Missing token parameter")
 			}
 
+			userID := c.Query("userId")
+			if userID == "" {
+				return c.Status(400).SendString("Missing userId parameter")
+			}
+
+			// Ensure token has Bearer prefix
+			if !strings.HasPrefix(authToken, "Bearer ") {
+				authToken = "Bearer " + authToken
+			}
+
+			c.Locals("authToken", authToken)
 			c.Locals("userID", userID)
 			c.Locals("allowed", true)
 			return c.Next()
@@ -74,7 +84,15 @@ func (ps *ProxyServer) setupRoutes() {
 func (ps *ProxyServer) handleWebSocketProxy(clientConn *websocket.Conn) {
 	defer clientConn.Close()
 
-	// Get user ID from locals (set in middleware)
+	// Get auth token and user ID from locals (set in middleware)
+	authToken, ok := clientConn.Locals("authToken").(string)
+	if !ok || authToken == "" {
+		log.Printf("Missing authToken in connection locals")
+		clientConn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseUnsupportedData, "Missing auth token"))
+		return
+	}
+
 	userID, ok := clientConn.Locals("userID").(string)
 	if !ok || userID == "" {
 		log.Printf("Missing userID in connection locals")
@@ -95,10 +113,12 @@ func (ps *ProxyServer) handleWebSocketProxy(clientConn *websocket.Conn) {
 
 	// Create headers for backend connection
 	headers := http.Header{}
-	headers.Set("X-User-Id", userID)
+	headers.Set("Authorization", authToken)
+	headers.Set("X-Device-Id", DeviceID)
 	headers.Set("Origin", "http://localhost:8081") // Set origin for proxy
 
-	log.Printf("📋 Sending headers to backend: X-User-Id=%s, Origin=%s", userID, "http://localhost:8081")
+	log.Printf("📋 Sending headers to backend: Authorization=%s..., X-Device-Id=%s, Origin=%s",
+		authToken[:20]+"...", DeviceID, "http://localhost:8081")
 
 	// Connect to backend WebSocket server using fasthttp websocket dialer
 	dialer := &fastws.Dialer{}

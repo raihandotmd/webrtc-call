@@ -1,8 +1,10 @@
 package main
 
 import (
-	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -87,27 +89,6 @@ func (h *Hub) CheckICERequestRateLimit(clientID string) bool {
 	return true
 }
 
-// GenerateICEServers generates ICE servers configuration for a client
-func (h *Hub) GenerateICEServers(clientID string) interface{} {
-	return fiber.Map{
-		"iceServers": []fiber.Map{
-			// STUN servers for NAT discovery (multiple for redundancy)
-			{"urls": "stun:stun.l.google.com:19302"},
-			{"urls": "stun:stun1.l.google.com:19302"},
-
-			// TURN server (static credentials for now - you can implement dynamic later)
-			{
-				"urls":       "turn:localhost:3478",
-				"username":   "testuser",
-				"credential": "testpass",
-			},
-
-			// TODO: Implement dynamic TURN credentials here
-			// This is where you'll add your dynamic credential generation
-		},
-	}
-}
-
 func main() {
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -176,64 +157,112 @@ func main() {
 			msg.From = clientID
 
 			log.Printf("Received %s message from %s to %s", msg.Type, msg.From, msg.To)
-
-			// Handle different message types
-			switch msg.Type {
-			case "ice-servers-request":
-				// Check rate limiting
-				if !hub.CheckICERequestRateLimit(clientID) {
-					log.Printf("ICE servers request rate limited for client %s", clientID)
-					errorResponse := SignalingMessage{
-						Type: "ice-servers-error",
-						To:   clientID,
-						Data: fiber.Map{"error": "Rate limited. Please wait before requesting again."},
-					}
-					errorBytes, _ := json.Marshal(errorResponse)
-					hub.SendToClient(clientID, errorBytes)
-					continue
-				}
-
-				// Generate ICE servers for this client
-				iceServers := hub.GenerateICEServers(clientID)
-				response := SignalingMessage{
-					Type: "ice-servers-response",
-					To:   clientID,
-					Data: iceServers,
-				}
-
-				responseBytes, err := json.Marshal(response)
-				if err != nil {
-					log.Printf("Error marshaling ICE servers response: %v", err)
-					continue
-				}
-
-				if err := hub.SendToClient(clientID, responseBytes); err != nil {
-					log.Printf("Error sending ICE servers to client %s: %v", clientID, err)
-				}
-
-			default:
-				// Forward other signaling messages to target client
-				if msg.To != "" {
-					msgBytes, err := json.Marshal(msg)
-					if err != nil {
-						log.Printf("JSON marshal error: %v", err)
-						continue
-					}
-
-					if err := hub.SendToClient(msg.To, msgBytes); err != nil {
-						log.Printf("Error sending to client %s: %v", msg.To, err)
-					}
-				}
-			}
 		}
 	}))
 
-	// ICE servers are now provided via WebSocket for better security
-	// No HTTP endpoint exposed
+	// TURN credentials endpoint - proxy to actual TURN credentials API with role support
+	app.Get("/turn-credentials/:role", func(c *fiber.Ctx) error {
+		role := c.Params("role")
+		if role != "customer" && role != "driver" {
+			return c.Status(400).JSON(fiber.Map{
+				"success": false,
+				"error":   "Invalid role. Must be 'customer' or 'driver'",
+				"data":    nil,
+			})
+		}
+
+		// Set CORS headers
+		c.Set("Access-Control-Allow-Origin", "*")
+		c.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		c.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id")
+
+		// Get Authorization token from header
+		authToken := c.Get("Authorization")
+		if authToken == "" {
+			return c.Status(401).JSON(fiber.Map{
+				"success": false,
+				"error":   "Missing Authorization header",
+				"data":    nil,
+			})
+		}
+
+		log.Printf("Making request to TURN credentials API for role: %s", role)
+
+		// Create HTTP client
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+		}
+
+		// Construct the backend URL based on role
+		backendURL := fmt.Sprintf("https://api-stag.superapi.my.id/communication/v1/%s/turn-credentials", role)
+
+		// Create request
+		req, err := http.NewRequest("GET", backendURL, nil)
+		if err != nil {
+			log.Printf("Error creating request: %v", err)
+			return c.Status(500).JSON(fiber.Map{
+				"success": false,
+				"error":   "Failed to create request",
+				"data":    nil,
+			})
+		}
+
+		// Add headers that the backend expects
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authToken)
+		req.Header.Set("X-Device-Id", c.Get("X-Device-Id"))
+
+		log.Printf("Request URL: %s", backendURL)
+		log.Printf("Request headers: %+v", req.Header)
+
+		// Make the request
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Error fetching TURN credentials: %v", err)
+			return c.Status(500).JSON(fiber.Map{
+				"success": false,
+				"error":   "Failed to fetch TURN credentials",
+				"data":    nil,
+			})
+		}
+		defer resp.Body.Close()
+
+		// Read response body
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Error reading TURN credentials response: %v", err)
+			return c.Status(500).JSON(fiber.Map{
+				"success": false,
+				"error":   "Failed to read TURN credentials response",
+				"data":    nil,
+			})
+		}
+
+		log.Printf("✅ TURN credentials response: %d bytes, status: %d", len(body), resp.StatusCode)
+		log.Printf("Response body: %s", string(body))
+
+		// Forward the response with the same status code
+		c.Status(resp.StatusCode)
+
+		// Set content type
+		contentType := resp.Header.Get("Content-Type")
+		if contentType != "" {
+			c.Set("Content-Type", contentType)
+		} else {
+			c.Set("Content-Type", "application/json")
+		}
+
+		return c.Send(body)
+	})
 
 	// Serve static files
 	app.Get("/", func(c *fiber.Ctx) error {
-		return c.SendFile("./callerA.html")
+		return c.SendFile("./client.html")
+	})
+
+	app.Get("/client.html", func(c *fiber.Ctx) error {
+		return c.SendFile("./client.html")
 	})
 
 	app.Get("/callerA.html", func(c *fiber.Ctx) error {
@@ -250,7 +279,12 @@ func main() {
 
 	log.Println("🚀 GoFiber WebRTC Signaling Server started at :8080")
 	log.Println("📡 WebSocket endpoint: ws://0.0.0.0:8080/ws?id=<client_id>")
-	log.Println("🌐 Web interface: http://0.0.0.0:8080")
+	log.Println("🔧 TURN credentials endpoints:")
+	log.Println("   Customer: http://0.0.0.0:8080/turn-credentials/customer")
+	log.Println("   Driver: http://0.0.0.0:8080/turn-credentials/driver")
+	log.Println("🌐 Dynamic client interface: http://0.0.0.0:8080/client.html")
+	log.Println("🌐 Legacy CallerA: http://0.0.0.0:8080/callerA.html")
+	log.Println("🌐 Legacy CallerB: http://0.0.0.0:8080/callerB.html")
 	log.Println("📱 For mobile testing: Use VS Code port forwarding or your local IP")
 	log.Println("🔧 Server listening on all interfaces (0.0.0.0:8080)")
 

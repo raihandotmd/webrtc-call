@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebRTC Client</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    .button {
+      padding: 10px 20px;
+      margin: 5px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .primary { background: #4CAF50; color: white; }
+    .secondary { background: #ff9800; color: white; }
+    .danger { background: #f44336; color: white; }
+    .disabled { background: #ccc; color: #666; cursor: not-allowed; }
+    .status { margin: 10px 0; padding: 10px; border-radius: 5px; background: #f5f5f5; }
+    .incoming-call {
+      display: none;
+      background: #f0f8ff;
+      padding: 15px;
+      border: 2px solid #4CAF50;
+      border-radius: 5px;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1 id="clientTitle">WebRTC Client</h1>
+  
+  <!-- Client ID Selection -->
+  <div id="clientSelection">
+    <h3>Authentication & Configuration:</h3>
+    <input type="text" id="jwtTokenInput" placeholder="Enter JWT Bearer Token" value="" style="width: 100%; margin-bottom: 10px;">
+    
+    <div style="margin-bottom: 10px;">
+      <label for="roleSelect">Select Role:</label>
+      <select id="roleSelect" style="padding: 8px; margin-left: 10px; border-radius: 4px; border: 1px solid #ccc;">
+        <option value="">-- Select Role --</option>
+        <option value="customer">Customer</option>
+        <option value="driver">Driver</option>
+      </select>
+    </div>
+    
+    <input type="text" id="clientIdInput" placeholder="Enter your client ID (e.g., 1, 2, alice, bob)" value="">
+    <input type="text" id="remoteClientIdInput" placeholder="Enter remote client ID to call" value="">
+    <button class="button primary" onclick="setClientId()">Set Configuration</button>
+  </div>
+  
+  <!-- Main Controls -->
+  <div id="mainControls" style="display: none;">
+    <div>
+      <button id="connectBtn" class="button primary">Connect to Server</button>
+      <button id="callBtn" class="button secondary" disabled>Make Call</button>
+      <button id="hangupBtn" class="button danger" disabled>Hang Up</button>
+      <button id="muteBtn" class="button secondary" disabled>🎤 Mute</button>
+    </div>
+    
+    <!-- Incoming call notification -->
+    <div id="incomingCallDiv" class="incoming-call">
+      <h3>📞 Incoming Call from Client <span id="callerName"></span></h3>
+      <button id="acceptBtn" class="button primary">Accept</button>
+      <button id="rejectBtn" class="button danger">Reject</button>
+    </div>
+    
+    <div class="status">
+      <p>Client ID: <span id="currentClientId">Not set</span></p>
+      <p>Remote Client ID: <span id="currentRemoteClientId">Not set</span></p>
+      <p>Status: <span id="status">Disconnected</span></p>
+      <p>Call State: <span id="callState">No Call</span></p>
+    </div>
+    
+    <audio id="remoteAudio" autoplay></audio>
+  </div>
+  
+  <script>
+    // Global variables
+    let clientId = "";
+    let remoteClientId = "";
+    let jwtToken = "";
+    let userRole = "";
+    let ws = null;
+    let pc = null;
+    let localStream = null;
+    let isMuted = false;
+    let pendingIceCandidates = [];
+    
+    // DOM elements
+    const jwtTokenInput = document.getElementById("jwtTokenInput");
+    const roleSelect = document.getElementById("roleSelect");
+    const clientIdInput = document.getElementById("clientIdInput");
+    const remoteClientIdInput = document.getElementById("remoteClientIdInput");
+    const clientSelection = document.getElementById("clientSelection");
+    const mainControls = document.getElementById("mainControls");
+    const clientTitle = document.getElementById("clientTitle");
+    const currentClientId = document.getElementById("currentClientId");
+    const currentRemoteClientId = document.getElementById("currentRemoteClientId");
+    const connectBtn = document.getElementById("connectBtn");
+    const callBtn = document.getElementById("callBtn");
+    const hangupBtn = document.getElementById("hangupBtn");
+    const muteBtn = document.getElementById("muteBtn");
+    const acceptBtn = document.getElementById("acceptBtn");
+    const rejectBtn = document.getElementById("rejectBtn");
+    const incomingCallDiv = document.getElementById("incomingCallDiv");
+    const callerName = document.getElementById("callerName");
+    const status = document.getElementById("status");
+    const callState = document.getElementById("callState");
+    const remoteAudio = document.getElementById("remoteAudio");
+
+    // Configuration - Update these for different environments
+    const CONFIG = {
+      // For local development
+      LOCAL: {
+        host: window.location.hostname + ':8081',
+        protocol: 'ws:'
+      },
+      // For ngrok tunnel
+      NGROK: {
+        host: 'ac2c487ab69a.ngrok-free.app',
+        protocol: 'wss:'
+      }
+    };
+    
+    // Switch between LOCAL and NGROK here
+    const CURRENT_ENV = 'LOCAL'; // Change to 'LOCAL' for local development
+    
+    const proxyHost = CONFIG[CURRENT_ENV].host;
+    const wsProtocol = CONFIG[CURRENT_ENV].protocol;
+
+    // Set client ID and show main interface
+    function setClientId() {
+      const inputJwtToken = jwtTokenInput.value.trim();
+      const inputRole = roleSelect.value;
+      const inputClientId = clientIdInput.value.trim();
+      const inputRemoteClientId = remoteClientIdInput.value.trim();
+      
+      if (!inputJwtToken || !inputRole || !inputClientId || !inputRemoteClientId) {
+        alert("Please enter JWT token, select role, and enter both client IDs");
+        return;
+      }
+      
+      if (inputClientId === inputRemoteClientId) {
+        alert("Client IDs must be different");
+        return;
+      }
+      
+      jwtToken = inputJwtToken;
+      userRole = inputRole;
+      clientId = inputClientId;
+      remoteClientId = inputRemoteClientId;
+      
+      // Update UI
+      clientTitle.textContent = `WebRTC Client (${clientId} - ${userRole})`;
+      currentClientId.textContent = `${clientId} (${userRole})`;
+      currentRemoteClientId.textContent = remoteClientId;
+      callBtn.textContent = `Call ${remoteClientId}`;
+      
+      // Show main controls
+      clientSelection.style.display = "none";
+      mainControls.style.display = "block";
+    }
+
+    // Update UI status
+    function updateStatus(message) {
+      status.textContent = message;
+      console.log("Status:", message);
+    }
+
+    function updateCallState(state) {
+      callState.textContent = state;
+      console.log("Call State:", state);
+    }
+
+    // Check and request microphone permissions early
+    async function checkMicrophonePermission() {
+      try {
+        // Check if permissions API is available
+        if ('permissions' in navigator) {
+          const permission = await navigator.permissions.query({ name: 'microphone' });
+          console.log("Microphone permission state:", permission.state);
+          
+          if (permission.state === 'denied') {
+            updateStatus("Microphone permission denied. Please allow access in browser settings.");
+            alert("Microphone access is required for calls. Please allow microphone access in your browser settings and refresh the page.");
+            return false;
+          }
+        }
+        
+        // For mobile browsers, request permission early
+        const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        testStream.getTracks().forEach(track => track.stop()); // Clean up test stream
+        console.log("Microphone permission granted");
+        return true;
+      } catch (error) {
+        console.error("Microphone permission check failed:", error);
+        if (error.name === 'NotAllowedError') {
+          updateStatus("Microphone permission denied. Please allow access.");
+          alert("Microphone access is required for calls. Please allow when prompted and refresh if needed.");
+        }
+        return false;
+      }
+    }
+
+    // Mute/Unmute microphone
+    function toggleMute() {
+      if (!localStream) {
+        console.log("No local stream to mute");
+        return;
+      }
+
+      const audioTracks = localStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        console.log("No audio tracks to mute");
+        return;
+      }
+
+      isMuted = !isMuted;
+      
+      // Toggle all audio tracks
+      audioTracks.forEach(track => {
+        track.enabled = !isMuted;
+      });
+
+      // Update button appearance
+      if (isMuted) {
+        muteBtn.innerHTML = "🔇 Unmute";
+        muteBtn.className = "button danger";
+        console.log("Microphone muted");
+      } else {
+        muteBtn.innerHTML = "🎤 Mute";
+        muteBtn.className = "button secondary";
+        console.log("Microphone unmuted");
+      }
+    }
+
+    // Fetch TURN credentials from backend
+    async function getTurnCredentials() {
+      try {
+        updateStatus("Fetching TURN credentials...");
+        
+        if (!userRole) {
+          throw new Error("User role not set");
+        }
+        
+        // Use role-based endpoint through the proxy
+        const response = await fetch(`/turn-credentials/${userRole}`, {
+          method: 'GET',
+          headers: {
+            'Authorization': jwtToken.startsWith('Bearer ') ? jwtToken : `Bearer ${jwtToken}`,
+            'X-Device-Id': 'Y41VwbdFXFleZeUktbdnIqapQFynB3XytWYidYSg9sZGRTYmyyO86ou4',
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Failed to fetch TURN credentials: ${response.status} ${response.statusText}`);
+        }
+        
+        const apiResponse = await response.json();
+        console.log("Received TURN credentials from backend:", apiResponse);
+        
+        // Check if API response is successful
+        if (!apiResponse.success || !apiResponse.data) {
+          throw new Error("Backend returned unsuccessful response: " + (apiResponse.error || "Unknown error"));
+        }
+        
+        const turnData = apiResponse.data;
+        
+        // Validate that we received TURN server data
+        if (!turnData.urls || !Array.isArray(turnData.urls) || turnData.urls.length === 0) {
+          throw new Error("No TURN server URLs received from backend");
+        }
+        
+        if (!turnData.username || !turnData.credential) {
+          throw new Error("Missing TURN credentials from backend");
+        }
+        
+        // Format the ICE servers according to WebRTC standard
+        const iceServers = [{
+          urls: turnData.urls,
+          username: turnData.username,
+          credential: turnData.credential
+        }];
+        
+        console.log("Using TURN servers:", iceServers);
+        console.log("TURN URLs:", turnData.urls);
+        console.log("TURN Username:", turnData.username);
+        console.log("TURN Credential length:", turnData.credential ? turnData.credential.length : 'null');
+        
+        // Validate TURN server URLs format
+        if (Array.isArray(turnData.urls)) {
+          turnData.urls.forEach((url, index) => {
+            console.log(`TURN URL ${index}:`, url);
+            if (!url.startsWith('turn:') && !url.startsWith('turns:')) {
+              console.warn(`Invalid TURN URL format: ${url}`);
+            }
+          });
+        }
+        
+        // Return ONLY the servers from backend - no hardcoded fallbacks
+        const rtcConfig = {
+          iceServers: iceServers,
+          iceCandidatePoolSize: 10,
+          iceTransportPolicy: 'relay' // Force TURN relay only - no STUN fallback
+        };
+        
+        console.log("Final RTC Configuration (TURN-only):", rtcConfig);
+        return rtcConfig;
+        
+      } catch (error) {
+        console.error("Error fetching TURN credentials:", error);
+        updateStatus("Failed to fetch TURN credentials: " + error.message);
+        throw error;
+      }
+    }
+
+    // Initialize WebRTC peer connection with TURN-only configuration
+    async function createPeerConnection() {
+      try {
+        const rtcConfiguration = await getTurnCredentials();
+        
+        console.log("Creating RTCPeerConnection with TURN-only config:", rtcConfiguration);
+        
+        // Validate configuration before creating peer connection
+        if (!rtcConfiguration.iceServers || rtcConfiguration.iceServers.length === 0) {
+          throw new Error("No ICE servers configured");
+        }
+        
+        // Additional validation for Firefox compatibility
+        rtcConfiguration.iceServers.forEach((server, index) => {
+          console.log(`Validating ICE server ${index}:`, server);
+          if (!server.urls || !server.username || !server.credential) {
+            console.error(`Invalid ICE server configuration at index ${index}:`, server);
+            throw new Error(`ICE server ${index} missing required fields`);
+          }
+        });
+        
+        try {
+          pc = new RTCPeerConnection(rtcConfiguration);
+          console.log("✅ RTCPeerConnection created successfully");
+        } catch (rtcError) {
+          console.error("❌ RTCPeerConnection creation failed:", rtcError);
+          console.error("Configuration that failed:", JSON.stringify(rtcConfiguration, null, 2));
+          throw new Error(`RTCPeerConnection creation failed: ${rtcError.message}`);
+        }
+
+        // Set up ICE connection timeout
+        let iceTimeoutId = setTimeout(() => {
+          if (pc && pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') {
+            console.error("ICE connection timeout - failing after 30 seconds");
+            updateCallState("Connection Timeout - Check TURN Server");
+          }
+        }, 30000); // 30 second timeout
+
+        // Clear timeout when ICE connects
+        pc.addEventListener('iceconnectionstatechange', () => {
+          console.log("ICE Connection state:", pc.iceConnectionState);
+          if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+            clearTimeout(iceTimeoutId);
+            updateCallState("Connected via TURN relay");
+          } else if (pc.iceConnectionState === 'failed') {
+            updateCallState("Connection failed - TURN server issue");
+          } else if (pc.iceConnectionState === 'disconnected') {
+            updateCallState("Connection lost");
+          }
+        });
+
+        // Handle ICE candidates
+        pc.onicecandidate = (event) => {
+          if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+            console.log("Sending ICE candidate to", remoteClientId, "type:", event.candidate.type);
+            
+            // Format according to new backend structure
+            const candidateMessage = {
+              ice_candidate: {
+                candidate: event.candidate.candidate,
+                username_fragment: event.candidate.usernameFragment
+              }
+            };
+            
+            ws.send(JSON.stringify({
+              event: "call_ice_candidate",
+              data: {
+                receiver_id: parseInt(remoteClientId),
+                message: candidateMessage
+              }
+            }));
+          } else if (!event.candidate) {
+            console.log("ICE gathering completed");
+          }
+        };
+
+        // Handle remote stream
+        pc.ontrack = (event) => {
+          console.log("Received remote stream");
+          remoteAudio.srcObject = event.streams[0];
+          updateCallState("Connected - Audio Playing");
+        };
+
+        // Handle connection state changes
+        pc.onconnectionstatechange = () => {
+          console.log("P2P Connection state:", pc.connectionState);
+          if (pc.connectionState === "connected") {
+            updateCallState("P2P Connected via TURN");
+          } else if (pc.connectionState === "disconnected" || pc.connectionState === "failed") {
+            updateCallState("P2P Disconnected");
+          }
+        };
+
+        // Handle ICE gathering state
+        pc.onicegatheringstatechange = () => {
+          console.log("ICE Gathering state:", pc.iceGatheringState);
+        };
+
+        // Add local stream
+        if (localStream) {
+          localStream.getTracks().forEach(track => {
+            pc.addTrack(track, localStream);
+          });
+        }
+        
+      } catch (error) {
+        console.error("Error creating peer connection:", error);
+        updateStatus("Failed to create peer connection");
+        throw error;
+      }
+    }
+
+    // Connect to WebSocket signaling server
+    async function connectToServer() {
+      updateStatus("Checking microphone permission...");
+      
+      // Check microphone permission first
+      const hasPermission = await checkMicrophonePermission();
+      if (!hasPermission) {
+        return;
+      }
+      
+      if (!jwtToken) {
+        alert("JWT token is required for connection");
+        return;
+      }
+      
+      updateStatus("Connecting to server...");
+      
+      try {
+        // Clean the token (remove Bearer prefix if present, we'll add it in the proxy)
+        const cleanToken = jwtToken.replace('Bearer ', '').trim();
+        
+        console.log('Connecting to WebSocket proxy with token authentication');
+        
+        // Create WebSocket connection with token in query params
+        const wsUrl = `${wsProtocol}//${proxyHost}/ws?userId=${clientId}&token=${encodeURIComponent(cleanToken)}`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          updateStatus("Connected to server");
+          connectBtn.disabled = true;
+          callBtn.disabled = false;
+        };
+        
+      } catch (error) {
+        console.error('Connection error:', error);
+        updateStatus("Connection failed: " + error.message);
+        return;
+      }
+
+      ws.onclose = () => {
+        updateStatus("Disconnected from server");
+        connectBtn.disabled = false;
+        callBtn.disabled = true;
+        hangupBtn.disabled = true;
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        updateStatus("Connection error");
+      };
+
+      ws.onmessage = async (event) => {
+        const message = JSON.parse(event.data);
+        console.log("Received message:", message);
+
+        // Handle call_request response from server
+        if (message.success !== undefined && message.metadata && message.metadata.request_id) {
+          if (message.success) {
+            console.log("Call request sent successfully");
+          } else {
+            console.error("Call request failed:", message.error);
+            updateCallState("Call request failed: " + message.error);
+            callBtn.disabled = false;
+          }
+          return;
+        }
+
+        // Handle incoming call_request from server
+        if (message.event === "call_request" && message.data && message.data.sender_id) {
+          if (message.data.sender_id == remoteClientId || message.data.sender_id == parseInt(remoteClientId)) {
+            await handleIncomingCall(message.data.sender_id);
+          }
+          return;
+        }
+
+        // Handle incoming call_answer from server
+        if (message.event === "call_answer" && message.data) {
+          // Check if this is a response to our call (sender_id check)
+          if (message.data.sender_id && (message.data.sender_id == remoteClientId || message.data.sender_id == parseInt(remoteClientId))) {
+            if (message.data.message && message.data.message.answer === true) {
+              await handleCallAccepted();
+            } else if (message.data.message && message.data.message.answer === false) {
+              await handleCallRejected();
+            }
+          }
+          // Also handle legacy format for backward compatibility
+          else if (message.data.sender_id && (message.data.sender_id == remoteClientId || message.data.sender_id == parseInt(remoteClientId))) {
+            if (message.data.accepted) {
+              await handleCallAccepted();
+            } else {
+              await handleCallRejected();
+            }
+          }
+          return;
+        }
+
+        // Handle incoming call_sdp_exchange from server
+        if (message.event === "call_sdp_exchange" && message.data && message.data.sender_id) {
+          if (message.data.sender_id == remoteClientId || message.data.sender_id == parseInt(remoteClientId)) {
+            // Check for SDP in the new nested structure
+            let sdp = null;
+            if (message.data.message && message.data.message.sdp_exchange) {
+              // New format: data.message.sdp_exchange.{type, sdp}
+              const sdpExchange = message.data.message.sdp_exchange;
+              sdp = {
+                type: sdpExchange.type,
+                sdp: sdpExchange.sdp
+              };
+            } else if (message.data.sdp) {
+              // Legacy format: direct sdp object
+              sdp = message.data.sdp;
+            } else if (message.data.message && message.data.message.sdp) {
+              // Legacy format: data.message.sdp
+              sdp = message.data.message.sdp;
+            } else if (message.data.message) {
+              // Legacy format: data.message as sdp
+              sdp = message.data.message;
+            }
+
+            if (sdp && sdp.type) {
+              if (sdp.type === "offer") {
+                await handleOffer(sdp);
+              } else if (sdp.type === "answer") {
+                await handleAnswer(sdp);
+              }
+            } else {
+              console.warn("Received call_sdp_exchange without valid SDP data:", message.data);
+            }
+          }
+          return;
+        }
+
+        // Handle incoming call_ice_candidate from server
+        if (message.event === "call_ice_candidate" && message.data && message.data.sender_id) {
+          if (message.data.sender_id == remoteClientId || message.data.sender_id == parseInt(remoteClientId)) {
+            // Check for candidate in the new nested structure
+            let candidate = null;
+            if (message.data.message && message.data.message.ice_candidate) {
+              // New format: data.message.ice_candidate.{candidate, username_fragment}
+              candidate = message.data.message.ice_candidate;
+            } else if (message.data.candidate) {
+              // Legacy format: direct candidate object
+              candidate = message.data.candidate;
+            } else if (message.data.message && message.data.message.candidate) {
+              // Legacy format: data.message.candidate
+              candidate = message.data.message.candidate;
+            } else if (message.data.message) {
+              // Legacy format: data.message as candidate
+              candidate = message.data.message;
+            }
+
+            if (candidate) {
+              await handleCandidate(candidate);
+            } else {
+              console.warn("Received call_ice_candidate without valid candidate data:", message.data);
+            }
+          }
+          return;
+        }
+
+        // Handle incoming call_hangup from server
+        if (message.event === "call_hangup" && message.data && message.data.sender_id) {
+          if (message.data.sender_id == remoteClientId || message.data.sender_id == parseInt(remoteClientId)) {
+            await handleRemoteHangup();
+          }
+          return;
+        }
+      };
+    }
+
+    // Handle incoming call request
+    async function handleIncomingCall(from) {
+      console.log("Incoming call from", from);
+      updateCallState("Incoming call...");
+      
+      // Show incoming call UI
+      callerName.textContent = from;
+      incomingCallDiv.style.display = "block";
+      callBtn.disabled = true;
+    }
+
+    // Handle call acceptance
+    async function handleCallAccepted() {
+      console.log("Call was accepted by", remoteClientId);
+      updateCallState("Call accepted, connecting...");
+      
+      // Enable hangup button as soon as call is accepted
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+      muteBtn.disabled = false;
+      
+      // Now proceed with WebRTC offer/answer exchange
+      await initiateWebRTCCall();
+    }
+
+    // Handle call rejection
+    async function handleCallRejected() {
+      console.log("Call was rejected by", remoteClientId);
+      updateCallState("Call rejected");
+      
+      // Reset UI
+      resetCallUI();
+    }
+
+    // Handle remote hangup
+    async function handleRemoteHangup() {
+      console.log("Remote client hung up");
+      updateCallState("Call ended by remote");
+      
+      // Close our side of the connection
+      hangup(false); // false = don't send hangup message (already received one)
+    }
+
+    // Accept incoming call
+    async function acceptCall() {
+      console.log("Accepting call from", remoteClientId);
+      
+      // Hide incoming call UI
+      incomingCallDiv.style.display = "none";
+      
+      // Send acceptance message using call_answer event
+      ws.send(JSON.stringify({
+        event: "call_answer",
+        data: {
+          receiver_id: parseInt(remoteClientId),
+          message: {
+            answer: true
+          }
+        }
+      }));
+      
+      updateCallState("Call accepted, waiting for connection...");
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+      muteBtn.disabled = false;
+      
+      // Get user media ready for when offer comes
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        console.log("Got local stream for accepting call");
+      } catch (error) {
+        console.error("Error getting media for accepting call:", error);
+        if (error.name === 'NotAllowedError') {
+          alert("Please allow microphone access to make calls. Check your browser settings.");
+        } else if (error.name === 'NotFoundError') {
+          updateCallState("No microphone found");
+        } else {
+          updateCallState("Error accessing microphone: " + error.name);
+        }
+        // Reset UI since we can't continue without audio
+        resetCallUI();
+        return;
+      }
+    }
+
+    // Reject incoming call
+    async function rejectCall() {
+      console.log("Rejecting call from", remoteClientId);
+      
+      // Hide incoming call UI
+      incomingCallDiv.style.display = "none";
+      
+      // Send rejection message using call_answer event
+      ws.send(JSON.stringify({
+        event: "call_answer",
+        data: {
+          receiver_id: parseInt(remoteClientId),
+          message: {
+            answer: false
+          }
+        }
+      }));
+      
+      updateCallState("Call rejected");
+      callBtn.disabled = false;
+    }
+
+    // Reset call UI to initial state
+    function resetCallUI() {
+      incomingCallDiv.style.display = "none";
+      callBtn.disabled = true;
+      hangupBtn.disabled = true;
+      muteBtn.disabled = true;
+      connectBtn.disabled = false;
+      
+      // Reset mute state
+      isMuted = false;
+      muteBtn.innerHTML = "🎤 Mute";
+      muteBtn.className = "button secondary";
+    }
+
+    // Initiate WebRTC call (after call acceptance)
+    async function initiateWebRTCCall() {
+      try {
+        // Get user media if not already obtained
+        if (!localStream) {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          console.log("Got local stream for initiating call");
+        }
+
+        // Create peer connection
+        await createPeerConnection();
+
+        // Create offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Send offer to remote client using SDP exchange
+        ws.send(JSON.stringify({
+          event: "call_sdp_exchange",
+          data: {
+            receiver_id: parseInt(remoteClientId),
+            message: {
+              sdp_exchange: {
+                type: offer.type,
+                sdp: offer.sdp
+              }
+            }
+          }
+        }));
+
+        updateCallState("Sending offer...");
+        hangupBtn.disabled = false;
+        muteBtn.disabled = false;
+
+      } catch (error) {
+        console.error("Error initiating WebRTC call:", error);
+        updateCallState("Call failed: " + error.message);
+      }
+    }
+
+    // Handle incoming offer
+    async function handleOffer(offer) {
+      console.log("Received offer from", remoteClientId);
+      updateCallState("Received offer, creating answer...");
+
+      if (!pc) await createPeerConnection();
+
+      await pc.setRemoteDescription(offer);
+      
+      // Process any queued ICE candidates now that remote description is set
+      await processPendingCandidates();
+      
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      // Send answer back using SDP exchange
+      ws.send(JSON.stringify({
+        event: "call_sdp_exchange",
+        data: {
+          receiver_id: parseInt(remoteClientId),
+          message: {
+            sdp_exchange: {
+              type: answer.type,
+              sdp: answer.sdp
+            }
+          }
+        }
+      }));
+
+      updateCallState("Answer sent, connecting...");
+      callBtn.disabled = true;
+      hangupBtn.disabled = false;
+      muteBtn.disabled = false;
+    }
+
+    // Handle incoming answer
+    async function handleAnswer(answer) {
+      console.log("Received answer from", remoteClientId);
+      await pc.setRemoteDescription(answer);
+      
+      // Process any queued ICE candidates now that remote description is set
+      await processPendingCandidates();
+      
+      updateCallState("Call connected");
+      hangupBtn.disabled = false;
+      muteBtn.disabled = false;
+    }
+
+    // Handle incoming ICE candidate with queuing for timing issues
+    async function handleCandidate(candidateData) {
+      console.log("Received ICE candidate from", remoteClientId, "data:", candidateData);
+      
+      // Reconstruct full RTCIceCandidate from simplified backend data
+      let rtcCandidate;
+      
+      if (candidateData.candidate && candidateData.username_fragment !== undefined) {
+        // New simplified format - reconstruct the RTCIceCandidate
+        rtcCandidate = new RTCIceCandidate({
+          candidate: candidateData.candidate,
+          sdpMLineIndex: candidateData.sdpMLineIndex || 0,  // Default to 0 for audio-only
+          sdpMid: candidateData.sdpMid || "0",              // Default to "0" for audio-only
+          usernameFragment: candidateData.username_fragment
+        });
+        console.log("Reconstructed RTCIceCandidate for audio-only call");
+      } else if (candidateData.candidate) {
+        // Legacy format - candidate is already a full RTCIceCandidate object
+        rtcCandidate = candidateData;
+        console.log("Using legacy RTCIceCandidate format");
+      } else {
+        console.error("Invalid candidate data received:", candidateData);
+        return;
+      }
+      
+      if (pc && pc.remoteDescription) {
+        // Remote description is set, add candidate immediately
+        try {
+          await pc.addIceCandidate(rtcCandidate);
+          console.log("Successfully added ICE candidate");
+        } catch (error) {
+          console.error("Error adding ICE candidate:", error);
+        }
+      } else {
+        // Remote description not set yet, queue the candidate
+        console.log("Queuing ICE candidate until remote description is set");
+        pendingIceCandidates.push(rtcCandidate);
+      }
+    }
+
+    // Process queued ICE candidates after remote description is set
+    async function processPendingCandidates() {
+      console.log(`Processing ${pendingIceCandidates.length} pending ICE candidates`);
+      
+      for (const candidate of pendingIceCandidates) {
+        try {
+          await pc.addIceCandidate(candidate);
+          console.log("Successfully added queued ICE candidate:", candidate.type);
+        } catch (error) {
+          console.error("Error adding queued ICE candidate:", error);
+        }
+      }
+      
+      // Clear the queue
+      pendingIceCandidates = [];
+    }
+
+    // Initiate call
+    async function makeCall() {
+      try {
+        updateCallState("Requesting call...");
+
+        // Send call request
+        ws.send(JSON.stringify({
+          event: "call_request",
+          data: {
+            receiver_id: parseInt(remoteClientId),
+          }
+        }));
+
+        updateCallState("Calling...");
+        callBtn.disabled = true;
+
+      } catch (error) {
+        console.error("Error making call:", error);
+        updateCallState("Call failed: " + error.message);
+        callBtn.disabled = false;
+      }
+    }
+
+    // Hang up call
+    function hangup(sendHangupMessage = true) {
+      console.log("Hanging up call");
+
+      // Send hangup message to remote client (unless we're hanging up due to remote hangup)
+      if (sendHangupMessage && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          event: "call_hangup",
+          data: {
+            receiver_id: parseInt(remoteClientId),
+          }
+        }));
+      }
+
+      // Close peer connection
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+
+      // Clear any pending ICE candidates
+      pendingIceCandidates = [];
+
+      // Stop local stream
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+
+      // Clear remote audio
+      remoteAudio.srcObject = null;
+      
+      // Reset UI
+      updateCallState("Call ended - Disconnecting...");
+      resetCallUI();
+      
+      // Close WebSocket connection to force clean reconnection
+      if (ws) {
+        console.log("Closing WebSocket connection for clean state");
+        ws.close();
+        ws = null;
+      }
+      
+      // Update UI to show disconnected state
+      updateStatus("Disconnected - Click Connect to make new calls");
+    }
+
+    // Event listeners
+    connectBtn.addEventListener("click", connectToServer);
+    callBtn.addEventListener("click", makeCall);
+    hangupBtn.addEventListener("click", () => hangup(true));
+    muteBtn.addEventListener("click", toggleMute);
+    acceptBtn.addEventListener("click", acceptCall);
+    rejectBtn.addEventListener("click", rejectCall);
+
+    // Initialize with URL parameters if provided
+    window.addEventListener('load', () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlClientId = urlParams.get('clientId');
+      const urlRemoteClientId = urlParams.get('remoteClientId');
+      const urlJwtToken = urlParams.get('token');
+      const urlRole = urlParams.get('role');
+      
+      if (urlJwtToken) {
+        jwtTokenInput.value = urlJwtToken;
+      }
+      if (urlRole && (urlRole === 'customer' || urlRole === 'driver')) {
+        roleSelect.value = urlRole;
+      }
+      if (urlClientId) {
+        clientIdInput.value = urlClientId;
+      }
+      if (urlRemoteClientId) {
+        remoteClientIdInput.value = urlRemoteClientId;
+      }
+      
+      console.log("Dynamic WebRTC Client initialized");
+    });
+  </script>
+</body>
+</html>
